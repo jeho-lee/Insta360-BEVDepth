@@ -95,11 +95,9 @@ def get_corners(boxes3d):
 
     return corners3d
 
-
 def get_bev_lines(corners):
     return [[[corners[i, 0], corners[(i + 1) % 4, 0]],
              [corners[i, 1], corners[(i + 1) % 4, 1]]] for i in range(4)]
-
 
 def get_3d_lines(corners):
     ret = []

@@ -55,6 +55,7 @@ backbone_conf = {
     'depth_net_conf':
     dict(in_channels=512, mid_channels=512)
 }
+
 ida_aug_conf = {
     'resize_lim': (0.386, 0.55),
     'final_dim':

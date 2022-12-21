@@ -3,7 +3,7 @@ import numpy as np
 from nuscenes.nuscenes import NuScenes
 from nuscenes.utils import splits
 from tqdm import tqdm
-
+import os
 
 def generate_info(nusc, scenes, max_cam_sweeps=6, max_lidar_sweeps=10):
     infos = list()
@@ -148,20 +148,22 @@ def generate_info(nusc, scenes, max_cam_sweeps=6, max_lidar_sweeps=10):
 
 def main():
     trainval_nusc = NuScenes(version='v1.0-trainval',
-                             dataroot='./data/nuScenes/',
+                             # dataroot='./data/nuScenes/',
+                             dataroot='../../BEVFormer/data/nuscenes/',
                              verbose=True)
     train_scenes = splits.train
     val_scenes = splits.val
     train_infos = generate_info(trainval_nusc, train_scenes)
     val_infos = generate_info(trainval_nusc, val_scenes)
-    mmcv.dump(train_infos, './data/nuScenes/nuscenes_infos_train.pkl')
-    mmcv.dump(val_infos, './data/nuScenes/nuscenes_infos_val.pkl')
-    test_nusc = NuScenes(version='v1.0-test',
-                         dataroot='./data/nuScenes/',
-                         verbose=True)
-    test_scenes = splits.test
-    test_infos = generate_info(test_nusc, test_scenes)
-    mmcv.dump(test_infos, './data/nuScenes/nuscenes_infos_test.pkl')
+    mmcv.dump(train_infos, './data/nuscenes/nuscenes_infos_train.pkl')
+    mmcv.dump(val_infos, './data/nuscenes/nuscenes_infos_val.pkl')
+    
+    # test_nusc = NuScenes(version='v1.0-test',
+    #                      dataroot='./data/nuScenes/',
+    #                      verbose=True)
+    # test_scenes = splits.test
+    # test_infos = generate_info(test_nusc, test_scenes)
+    # mmcv.dump(test_infos, './data/nuscenes/nuscenes_infos_test.pkl')
 
 
 if __name__ == '__main__':
