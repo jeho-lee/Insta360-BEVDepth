@@ -596,6 +596,7 @@ class NuscDetDataset(Dataset):
         return cams
 
     def __getitem__(self, idx):
+        # print("__getitem__, idx: ", idx)
         if self.use_cbgs:
             idx = self.sample_indices[idx]
         cam_infos = list()
@@ -641,7 +642,6 @@ class NuscDetDataset(Dataset):
                             break
         if self.return_depth or self.use_fusion:
             image_data_list = self.get_image(cam_infos, cams, lidar_infos)
-
         else:
             image_data_list = self.get_image(cam_infos, cams)
         ret_list = list()
