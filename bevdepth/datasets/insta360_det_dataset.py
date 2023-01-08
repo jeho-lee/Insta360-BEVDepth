@@ -9,6 +9,7 @@ from nuscenes.utils.geometry_utils import view_points
 from PIL import Image
 from pyquaternion import Quaternion
 from torch.utils.data import Dataset
+from torchvision import transforms
 
 __all__ = ['NuscDetDataset']
 
@@ -390,6 +391,10 @@ class NuscDetDataset(Dataset):
         """
         assert len(cam_infos) > 0
         sweep_imgs = list()
+        
+        # for pose network
+        pose_input_imgs = list()
+        
         sweep_sensor2ego_mats = list()
         sweep_intrin_mats = list()
         sweep_ida_mats = list()
@@ -407,6 +412,10 @@ class NuscDetDataset(Dataset):
                 sweep_lidar_points.append(lidar_points)
         for cam in cams:
             imgs = list()
+            
+            # for pose network
+            campose_imgs = list()
+            
             sensor2ego_mats = list()
             intrin_mats = list()
             ida_mats = list()
@@ -414,14 +423,12 @@ class NuscDetDataset(Dataset):
             timestamps = list()
             lidar_depth = list()
             key_info = cam_infos[0]
-            resize, resize_dims, crop, flip, \
-                rotate_ida = self.sample_ida_augmentation(
-                    )
-            for sweep_idx, cam_info in enumerate(cam_infos):
+            resize, resize_dims, crop, flip, rotate_ida = self.sample_ida_augmentation()
+            for sweep_idx, cam_info in enumerate(cam_infos): # key_idxes [0, -1] 즉 현재 frmae과 직전 keyframe에 대해 enum
 
-                img = Image.open(
-                    os.path.join(self.data_root, cam_info[cam]['filename']))
+                img = Image.open(os.path.join(self.data_root, cam_info[cam]['filename']))
                 # img = Image.fromarray(img)
+                
                 w, x, y, z = cam_info[cam]['calibrated_sensor']['rotation']
                 # sweep sensor to sweep ego
                 sweepsensor2sweepego_rot = torch.Tensor(
@@ -433,6 +440,7 @@ class NuscDetDataset(Dataset):
                 sweepsensor2sweepego[3, 3] = 1
                 sweepsensor2sweepego[:3, :3] = sweepsensor2sweepego_rot
                 sweepsensor2sweepego[:3, -1] = sweepsensor2sweepego_tran
+                
                 # sweep ego to global
                 w, x, y, z = cam_info[cam]['ego_pose']['rotation']
                 sweepego2global_rot = torch.Tensor(
@@ -476,8 +484,7 @@ class NuscDetDataset(Dataset):
                 sensor2sensor_mats.append(keysensor2sweepsensor)
                 intrin_mat = torch.zeros((4, 4))
                 intrin_mat[3, 3] = 1
-                intrin_mat[:3, :3] = torch.Tensor(
-                    cam_info[cam]['calibrated_sensor']['camera_intrinsic'])
+                intrin_mat[:3, :3] = torch.Tensor(cam_info[cam]['calibrated_sensor']['camera_intrinsic'])
                 if self.return_depth and (self.use_fusion or sweep_idx == 0):
                     point_depth = self.get_lidar_depth(
                         sweep_lidar_points[sweep_idx], img,
@@ -486,6 +493,16 @@ class NuscDetDataset(Dataset):
                         point_depth, resize, self.ida_aug_conf['final_dim'],
                         crop, flip, rotate_ida)
                     lidar_depth.append(point_depth_augmented)
+                
+                # for pose network
+                original_width, original_height = img.size
+                """TEMP 임시로 resize_width 및 height 여기에서 정의"""
+                pose_input_img = img.resize((640, 192), Image.Resampling.LANCZOS)
+                pose_input_img = transforms.ToTensor()(pose_input_img).unsqueeze(0)
+                
+                campose_imgs.append(pose_input_img)
+                
+                # for 3D object detection network
                 img, ida_mat = img_transform(
                     img,
                     resize=resize,
@@ -494,13 +511,17 @@ class NuscDetDataset(Dataset):
                     flip=flip,
                     rotate=rotate_ida,
                 )
+                
                 ida_mats.append(ida_mat)
-                img = mmcv.imnormalize(np.array(img), self.img_mean,
-                                       self.img_std, self.to_rgb)
+                img = mmcv.imnormalize(np.array(img), self.img_mean, self.img_std, self.to_rgb)
                 img = torch.from_numpy(img).permute(2, 0, 1)
                 imgs.append(img)
                 intrin_mats.append(intrin_mat)
                 timestamps.append(cam_info[cam]['timestamp'])
+            
+            # for pose network: total cams' pose network inputs
+            pose_input_imgs.append(torch.stack(campose_imgs))
+            
             sweep_imgs.append(torch.stack(imgs))
             sweep_sensor2ego_mats.append(torch.stack(sensor2ego_mats))
             sweep_intrin_mats.append(torch.stack(intrin_mats))
@@ -521,13 +542,16 @@ class NuscDetDataset(Dataset):
         )
 
         ret_list = [
-            torch.stack(sweep_imgs).permute(1, 0, 2, 3, 4),
+            torch.stack(sweep_imgs).permute(1, 0, 2, 3, 4), 
             torch.stack(sweep_sensor2ego_mats).permute(1, 0, 2, 3),
             torch.stack(sweep_intrin_mats).permute(1, 0, 2, 3),
             torch.stack(sweep_ida_mats).permute(1, 0, 2, 3),
             torch.stack(sweep_sensor2sensor_mats).permute(1, 0, 2, 3),
             torch.stack(sweep_timestamps).permute(1, 0),
             img_metas,
+            
+            # for pose net
+            pose_input_imgs
         ]
         if self.return_depth:
             ret_list.append(torch.stack(sweep_lidar_depth).permute(1, 0, 2, 3))
@@ -656,7 +680,11 @@ class NuscDetDataset(Dataset):
             sweep_sensor2sensor_mats,
             sweep_timestamps,
             img_metas,
-        ) = image_data_list[:7]
+            
+            # for pose network
+            pose_input_imgs
+        ) = image_data_list[:8]
+        
         img_metas['token'] = self.infos[idx]['sample_token']
         if self.is_train:
             gt_boxes, gt_labels = self.get_gt(self.infos[idx], cams)
@@ -665,12 +693,10 @@ class NuscDetDataset(Dataset):
             gt_boxes = sweep_imgs.new_zeros(0, 7)
             gt_labels = sweep_imgs.new_zeros(0, )
 
-        rotate_bda, scale_bda, flip_dx, flip_dy = self.sample_bda_augmentation(
-        )
+        rotate_bda, scale_bda, flip_dx, flip_dy = self.sample_bda_augmentation()
         bda_mat = sweep_imgs.new_zeros(4, 4)
         bda_mat[3, 3] = 1
-        gt_boxes, bda_rot = bev_transform(gt_boxes, rotate_bda, scale_bda,
-                                          flip_dx, flip_dy)
+        gt_boxes, bda_rot = bev_transform(gt_boxes, rotate_bda, scale_bda, flip_dx, flip_dy)
         bda_mat[:3, :3] = bda_rot
         ret_list = [
             sweep_imgs,
@@ -683,6 +709,9 @@ class NuscDetDataset(Dataset):
             img_metas,
             gt_boxes,
             gt_labels,
+            
+            # for pose network
+            pose_input_imgs
         ]
         if self.return_depth:
             ret_list.append(image_data_list[7])
@@ -702,6 +731,10 @@ class NuscDetDataset(Dataset):
 
 def collate_fn(data, is_return_depth=False):
     imgs_batch = list()
+    
+    # for pose network
+    pose_input_imgs_batch = list()
+    
     sensor2ego_mats_batch = list()
     intrin_mats_batch = list()
     ida_mats_batch = list()
@@ -712,6 +745,7 @@ def collate_fn(data, is_return_depth=False):
     gt_labels_batch = list()
     img_metas_batch = list()
     depth_labels_batch = list()
+    
     for iter_data in data:
         (
             sweep_imgs,
@@ -724,11 +758,19 @@ def collate_fn(data, is_return_depth=False):
             img_metas,
             gt_boxes,
             gt_labels,
-        ) = iter_data[:10]
+            
+            # for pose network
+            pose_input_imgs
+        ) = iter_data[:11]
         if is_return_depth:
             gt_depth = iter_data[10]
             depth_labels_batch.append(gt_depth)
+            
         imgs_batch.append(sweep_imgs)
+        
+        # for pose network
+        pose_input_imgs_batch.append(pose_input_imgs)
+        
         sensor2ego_mats_batch.append(sweep_sensor2ego_mats)
         intrin_mats_batch.append(sweep_intrins)
         ida_mats_batch.append(sweep_ida_mats)
@@ -744,6 +786,7 @@ def collate_fn(data, is_return_depth=False):
     mats_dict['ida_mats'] = torch.stack(ida_mats_batch)
     mats_dict['sensor2sensor_mats'] = torch.stack(sensor2sensor_mats_batch)
     mats_dict['bda_mat'] = torch.stack(bda_mat_batch)
+    
     ret_list = [
         torch.stack(imgs_batch),
         mats_dict,
@@ -751,6 +794,9 @@ def collate_fn(data, is_return_depth=False):
         img_metas_batch,
         gt_boxes_batch,
         gt_labels_batch,
+        
+        # for pose network
+        pose_input_imgs_batch
     ]
     if is_return_depth:
         ret_list.append(torch.stack(depth_labels_batch))
