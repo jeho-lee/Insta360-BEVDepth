@@ -500,6 +500,8 @@ class NuscDetDataset(Dataset):
                 pose_input_img = img.resize((640, 192), Image.Resampling.LANCZOS)
                 pose_input_img = transforms.ToTensor()(pose_input_img).unsqueeze(0)
                 
+                # print(pose_input_img.shape)
+                
                 campose_imgs.append(pose_input_img)
                 
                 # for 3D object detection network
@@ -542,7 +544,7 @@ class NuscDetDataset(Dataset):
         )
 
         ret_list = [
-            torch.stack(sweep_imgs).permute(1, 0, 2, 3, 4), 
+            torch.stack(sweep_imgs).permute(1, 0, 2, 3, 4),
             torch.stack(sweep_sensor2ego_mats).permute(1, 0, 2, 3),
             torch.stack(sweep_intrin_mats).permute(1, 0, 2, 3),
             torch.stack(sweep_ida_mats).permute(1, 0, 2, 3),
