@@ -466,10 +466,8 @@ class NuscDetDataset(Dataset):
 
                 # cur ego to sensor
                 w, x, y, z = key_info[cam]['calibrated_sensor']['rotation']
-                keysensor2keyego_rot = torch.Tensor(
-                    Quaternion(w, x, y, z).rotation_matrix)
-                keysensor2keyego_tran = torch.Tensor(
-                    key_info[cam]['calibrated_sensor']['translation'])
+                keysensor2keyego_rot = torch.Tensor(Quaternion(w, x, y, z).rotation_matrix)
+                keysensor2keyego_tran = torch.Tensor(key_info[cam]['calibrated_sensor']['translation'])
                 keysensor2keyego = keysensor2keyego_rot.new_zeros((4, 4))
                 keysensor2keyego[3, 3] = 1
                 keysensor2keyego[:3, :3] = keysensor2keyego_rot
@@ -478,13 +476,15 @@ class NuscDetDataset(Dataset):
                 keysensor2sweepsensor = (
                     keyego2keysensor @ global2keyego @ sweepego2global
                     @ sweepsensor2sweepego).inverse()
-                sweepsensor2keyego = global2keyego @ sweepego2global @\
-                    sweepsensor2sweepego
+                sweepsensor2keyego = global2keyego @ sweepego2global @ sweepsensor2sweepego
+                
                 sensor2ego_mats.append(sweepsensor2keyego)
                 sensor2sensor_mats.append(keysensor2sweepsensor)
+                
                 intrin_mat = torch.zeros((4, 4))
                 intrin_mat[3, 3] = 1
                 intrin_mat[:3, :3] = torch.Tensor(cam_info[cam]['calibrated_sensor']['camera_intrinsic'])
+                
                 if self.return_depth and (self.use_fusion or sweep_idx == 0):
                     point_depth = self.get_lidar_depth(
                         sweep_lidar_points[sweep_idx], img,
