@@ -431,22 +431,17 @@ class NuscDetDataset(Dataset):
                 
                 w, x, y, z = cam_info[cam]['calibrated_sensor']['rotation']
                 # sweep sensor to sweep ego
-                sweepsensor2sweepego_rot = torch.Tensor(
-                    Quaternion(w, x, y, z).rotation_matrix)
-                sweepsensor2sweepego_tran = torch.Tensor(
-                    cam_info[cam]['calibrated_sensor']['translation'])
-                sweepsensor2sweepego = sweepsensor2sweepego_rot.new_zeros(
-                    (4, 4))
+                sweepsensor2sweepego_rot = torch.Tensor(Quaternion(w, x, y, z).rotation_matrix)
+                sweepsensor2sweepego_tran = torch.Tensor(cam_info[cam]['calibrated_sensor']['translation'])
+                sweepsensor2sweepego = sweepsensor2sweepego_rot.new_zeros((4, 4))
                 sweepsensor2sweepego[3, 3] = 1
                 sweepsensor2sweepego[:3, :3] = sweepsensor2sweepego_rot
                 sweepsensor2sweepego[:3, -1] = sweepsensor2sweepego_tran
                 
                 # sweep ego to global
                 w, x, y, z = cam_info[cam]['ego_pose']['rotation']
-                sweepego2global_rot = torch.Tensor(
-                    Quaternion(w, x, y, z).rotation_matrix)
-                sweepego2global_tran = torch.Tensor(
-                    cam_info[cam]['ego_pose']['translation'])
+                sweepego2global_rot = torch.Tensor(Quaternion(w, x, y, z).rotation_matrix)
+                sweepego2global_tran = torch.Tensor(cam_info[cam]['ego_pose']['translation'])
                 sweepego2global = sweepego2global_rot.new_zeros((4, 4))
                 sweepego2global[3, 3] = 1
                 sweepego2global[:3, :3] = sweepego2global_rot
@@ -454,10 +449,8 @@ class NuscDetDataset(Dataset):
 
                 # global sensor to cur ego
                 w, x, y, z = key_info[cam]['ego_pose']['rotation']
-                keyego2global_rot = torch.Tensor(
-                    Quaternion(w, x, y, z).rotation_matrix)
-                keyego2global_tran = torch.Tensor(
-                    key_info[cam]['ego_pose']['translation'])
+                keyego2global_rot = torch.Tensor(Quaternion(w, x, y, z).rotation_matrix)
+                keyego2global_tran = torch.Tensor(key_info[cam]['ego_pose']['translation'])
                 keyego2global = keyego2global_rot.new_zeros((4, 4))
                 keyego2global[3, 3] = 1
                 keyego2global[:3, :3] = keyego2global_rot
@@ -473,10 +466,11 @@ class NuscDetDataset(Dataset):
                 keysensor2keyego[:3, :3] = keysensor2keyego_rot
                 keysensor2keyego[:3, -1] = keysensor2keyego_tran
                 keyego2keysensor = keysensor2keyego.inverse()
-                keysensor2sweepsensor = (
-                    keyego2keysensor @ global2keyego @ sweepego2global
-                    @ sweepsensor2sweepego).inverse()
-                sweepsensor2keyego = global2keyego @ sweepego2global @ sweepsensor2sweepego
+                
+                """ final value (matrix) """
+                sweepsensor2keyego = global2keyego @ sweepego2global @ sweepsensor2sweepego # sensor2ego
+                keysensor2sweepsensor = (keyego2keysensor @ sweepsensor2keyego).inverse() # sensor2sensor
+                # keysensor2sweepsensor = (keyego2keysensor @ global2keyego @ sweepego2global @ sweepsensor2sweepego).inverse()
                 
                 sensor2ego_mats.append(sweepsensor2keyego)
                 sensor2sensor_mats.append(keysensor2sweepsensor)
@@ -653,10 +647,8 @@ class NuscDetDataset(Dataset):
                     cam_infos.append(info['cam_infos'])
                     lidar_infos.append(info['lidar_infos'])
                 else:
-                    # Handle scenarios when current sweep doesn't have all
-                    # cam keys.
-                    for i in range(min(len(info['cam_sweeps']) - 1, sweep_idx),
-                                   -1, -1):
+                    # Handle scenarios when current sweep doesn't have all cam keys.
+                    for i in range(min(len(info['cam_sweeps']) - 1, sweep_idx), -1, -1):
                         if sum([cam in info['cam_sweeps'][i]
                                 for cam in cams]) == len(cams):
                             cam_infos.append(info['cam_sweeps'][i])
@@ -665,8 +657,7 @@ class NuscDetDataset(Dataset):
                                 for val in info['cam_sweeps'][i].values()
                             ])
                             # Find the closest lidar frame to the cam frame.
-                            lidar_idx = np.abs(lidar_sweep_timestamps -
-                                               cam_timestamp).argmin()
+                            lidar_idx = np.abs(lidar_sweep_timestamps - cam_timestamp).argmin()
                             lidar_infos.append(info['lidar_sweeps'][lidar_idx])
                             break
         if self.return_depth or self.use_fusion:
