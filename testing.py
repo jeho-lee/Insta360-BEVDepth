@@ -3876,17 +3876,72 @@ tangent_w = 704 # 704 # 1600 # 704
 fov  = [70, 39.375]
 erp_h, erp_w = 1920, 3840
 
-n_patch, grid = createProjectGrid(tangent_h, tangent_w, num_rows, num_cols, phi_centers, fov)
+n_patch, grid = createProjectGrid(erp_h, erp_w, tangent_h, tangent_w, num_rows, num_cols, phi_centers, fov)
 
 """ Init Insta360 ERP Dataset Meta-data """
 
+scene_dir = "scene_1/"
+erp_img_root = "../data/daejeon_road_outdoor/erp_images/"
+# filename = "frame_0001.jpg"
+# erp_img_path = os.path.join(erp_img_root, scene_dir, filename)
+
+erp_imgs = []
+for filename in os.listdir(erp_img_root + scene_dir):
+    erp_imgs.append(os.path.join(erp_img_root, scene_dir, filename))
+    
+# ida_aug_conf['cams'] = ['CAM_BACK_RIGHT',
+#                         'CAM_FRONT_LEFT',
+#                         'CAM_FRONT',
+#                         'CAM_FRONT_RIGHT',
+#                         'CAM_BACK_LEFT',
+#                         'CAM_BACK']
+
+ida_aug_conf['cams'] = ['CAM_FRONT_LEFT',
+                        'CAM_FRONT',
+                        'CAM_FRONT_RIGHT',
+                        'CAM_BACK_LEFT',
+                        'CAM_BACK',
+                        'CAM_BACK_RIGHT']
+
 """sensor2ego (calibrated_sensor) rotation degree를 insta360에 맞게 변경"""
-sensor2ego_rot_eulers = {'CAM_FRONT': [-88.89452145820958, -0.34991764317283675, 0.0],
-                            'CAM_FRONT_RIGHT': [-89.73833720738743, 1.5337073678165962, -60.0],
-                            'CAM_FRONT_LEFT': [-89.2717432442176, -1.221029004801636, 60.0],
-                            'CAM_BACK': [-90.4448247670561, 0.552239989680819, 180.0],
-                            'CAM_BACK_LEFT': [-91.67728722938543, -1.4284019448799024, 120.0],
-                            'CAM_BACK_RIGHT': [-91.13862482181912, 2.0544464501438036, -120.0]}
+# [roll, pitch, yaw]
+
+# BEVFormer에서 사용한 sensor2lidar
+# sensor2ego_rot_eulers = {'CAM_FRONT': [-88.89452145820958, -0.34991764317283675, 0.0],
+#                          'CAM_FRONT_RIGHT': [-89.73833720738743, 1.5337073678165962, -60.0],
+#                          'CAM_FRONT_LEFT': [-89.2717432442176, -1.221029004801636, 60.0],
+#                          'CAM_BACK': [-90.4448247670561, 0.552239989680819, 180.0],
+#                          'CAM_BACK_LEFT': [-91.67728722938543, -1.4284019448799024, 120.0],
+#                          'CAM_BACK_RIGHT': [-91.13862482181912, 2.0544464501438036, -120.0]}
+
+# BEVFormer에서 사용한 sensor2ego
+# sensor2ego_rot_eulers = {'CAM_FRONT': [-90.32322642770005, -0.046127194838589326, -90.0],
+#                          'CAM_FRONT_RIGHT': [-90.7820235885, 0.5188438566959973, -150.0],
+#                          'CAM_FRONT_LEFT': [-89.85977500319999, 0.12143609391200436, -30.0],
+#                          'CAM_BACK': [-89.0405962694, 0.22919685786400154, 90.0],
+#                          'CAM_BACK_LEFT': [-90.91736319750001, -0.21518275753700122, 30.0],
+#                          'CAM_BACK_RIGHT': [-90.93206677999999, 0.6190947610589966, -210.0]}
+
+# sensor2ego_rot_eulers = {'CAM_FRONT': [-90.32322642770005, -0.046127194838589326, -60.0],
+#                          'CAM_FRONT_RIGHT': [-90.7820235885, 0.5188438566959973, -120.0],
+#                          'CAM_FRONT_LEFT': [-89.85977500319999, 0.12143609391200436, -0.0],
+#                          'CAM_BACK': [-89.0405962694, 0.22919685786400154, 120.0],
+#                          'CAM_BACK_LEFT': [-90.91736319750001, -0.21518275753700122, 60.0],
+#                          'CAM_BACK_RIGHT': [-90.93206677999999, 0.6190947610589966, -180.0]}
+
+sensor2ego_rot_eulers = {'CAM_FRONT': [-90.0, 0.0, 0.0],
+                         'CAM_FRONT_RIGHT': [-90.0, 0.0, -60.0],
+                         'CAM_FRONT_LEFT': [-90.0, 0.0, 60.0],
+                         'CAM_BACK': [-90.0, 0.0, 180.0],
+                         'CAM_BACK_LEFT': [-90.0, 0.0, 120.0],
+                         'CAM_BACK_RIGHT': [-90.0, 0.0, -120.0]}
+
+# sensor2ego_rot_eulers = {'CAM_FRONT': [-90.0, 0.0, 90.0],
+#                          'CAM_FRONT_RIGHT': [-90.0, 0.0, 30.0],
+#                          'CAM_FRONT_LEFT': [-90.0, 0.0, 150.0],
+#                          'CAM_BACK': [-90.0, 0.0, -90.0],
+#                          'CAM_BACK_LEFT': [-90.0, 0.0, -150.0],
+#                          'CAM_BACK_RIGHT': [-90.0, 0.0, -30.0]}
 
 # sensor2ego_rots = [] # tcam2egocam_rots
 # for i in range(len(ida_aug_conf['cams'])):
@@ -3902,12 +3957,24 @@ sensor2ego_rot_eulers = {'CAM_FRONT': [-88.89452145820958, -0.34991764317283675,
 #     # print(cam, sensor2ego_q)
 #     # print(cam, [euler / np.pi * 180 for euler in radians])
 
-tangent_intrinsics = {'CAM_FRONT': [[1343.45019, 0.0, 820.183159], [0.0, 1280.23476, 442.850375], [0.0, 0.0, 1.0]],
-                      'CAM_FRONT_RIGHT': [[1318.58226, 0.0, 748.797979], [0.0, 1307.51676, 433.683573], [0.0, 0.0, 1.0]],
-                      'CAM_FRONT_LEFT': [[1326.72632, 0.0, 789.918136], [0.0, 1313.8785, 447.051964], [0.0, 0.0, 1.0]],
-                      'CAM_BACK': [[1318.10344, 0.0, 760.164664], [0.0, 1307.00893, 433.459504], [0.0, 0.0, 1.0]],
-                      'CAM_BACK_LEFT': [[1329.78802, 0.0, 794.247861], [0.0, 1318.65546, 422.083681], [0.0, 0.0, 1.0]],
-                      'CAM_BACK_RIGHT': [[1342.27544, 0.0, 790.251605], [0.0, 1326.28658, 452.853747], [0.0, 0.0, 1.0]]}
+sensor2ego_trans = [0.0, 0.0, 0.0]
+
+ego2global_rotation = np.array([1.0, 0.0, 0.0, 0.0])
+ego2global_translation = np.array([0.0, 0.0, 0.0])
+
+# tangent_intrinsics = {'CAM_FRONT': [[1343.45019, 0.0, 820.183159], [0.0, 1280.23476, 442.850375], [0.0, 0.0, 1.0]],
+#                       'CAM_FRONT_RIGHT': [[1318.58226, 0.0, 748.797979], [0.0, 1307.51676, 433.683573], [0.0, 0.0, 1.0]],
+#                       'CAM_FRONT_LEFT': [[1326.72632, 0.0, 789.918136], [0.0, 1313.8785, 447.051964], [0.0, 0.0, 1.0]],
+#                       'CAM_BACK': [[1318.10344, 0.0, 760.164664], [0.0, 1307.00893, 433.459504], [0.0, 0.0, 1.0]],
+#                       'CAM_BACK_LEFT': [[1329.78802, 0.0, 794.247861], [0.0, 1318.65546, 422.083681], [0.0, 0.0, 1.0]],
+#                       'CAM_BACK_RIGHT': [[1342.27544, 0.0, 790.251605], [0.0, 1326.28658, 452.853747], [0.0, 0.0, 1.0]]}
+
+tangent_intrinsics = {'CAM_FRONT': [[1250.45019, 0.0, 820.183159], [0.0, 1250.23476, 442.850375], [0.0, 0.0, 1.0]],
+                      'CAM_FRONT_RIGHT': [[1250.58226, 0.0, 748.797979], [0.0, 1250.51676, 433.683573], [0.0, 0.0, 1.0]],
+                      'CAM_FRONT_LEFT': [[1250.72632, 0.0, 789.918136], [0.0, 1250.8785, 447.051964], [0.0, 0.0, 1.0]],
+                      'CAM_BACK': [[1250.10344, 0.0, 760.164664], [0.0, 1250.00893, 433.459504], [0.0, 0.0, 1.0]],
+                      'CAM_BACK_LEFT': [[1250.78802, 0.0, 794.247861], [0.0, 1250.65546, 422.083681], [0.0, 0.0, 1.0]],
+                      'CAM_BACK_RIGHT': [[1250.27544, 0.0, 790.251605], [0.0, 1250.28658, 452.853747], [0.0, 0.0, 1.0]]}
 
 """ Init Nusc Dataset """
 dataset = NuscDetDataset(ida_aug_conf=ida_aug_conf,
@@ -3920,6 +3987,11 @@ dataset = NuscDetDataset(ida_aug_conf=ida_aug_conf,
                          # Dataset customization
                          tangent_intrinsics=tangent_intrinsics,
                          sensor2ego_rot_eulers=sensor2ego_rot_eulers,
+                         sensor2ego_trans=sensor2ego_trans,
+                         ego2global_rotation=ego2global_rotation,
+                         ego2global_translation=ego2global_translation,
+                         
+                         infos=infos,
                          
                          img_conf=img_conf,
                          num_sweeps=num_sweeps,
@@ -3940,17 +4012,11 @@ data_loader = torch.utils.data.DataLoader(
 idx = -1
 data_iterator = iter(data_loader)
 data = next(data_iterator)
+
 # Iterator
 idx = idx + 1
 idx
-scene_dir = "scene_1/"
-erp_img_root = "../data/daejeon_road_outdoor/erp_images/"
-filename = "frame_0001.jpg"
-erp_img_path = os.path.join(erp_img_root, scene_dir, filename)
 
-erp_imgs = []
-for filename in os.listdir(erp_img_root + scene_dir):
-    erp_imgs.append(os.path.join(erp_img_root, scene_dir, filename))
 (_, mats, _, img_metas, _, _, campose_imgs) = data
 
 for key, value in mats.items():
@@ -3973,12 +4039,11 @@ for key_idx in [0, -1]: # current idx first
     erp_img = erp_img.unsqueeze(0) # Increase Tensor dimension by 1
     
     adj_erp_imgs.append(erp_img)
+    
 # 시작!
-
-with profile(activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA], record_shapes=True) as prof:
-# with profile(with_stack=True, use_cuda=True, profile_memory=True) as prof:
-    # starter.record()
-
+with torch.no_grad():
+    starter.record()
+    
     # to GPU memory (시간 측정?)
     for i, erp_img in enumerate(adj_erp_imgs):
         adj_erp_imgs[i] = erp_img.to(device)
@@ -3999,12 +4064,12 @@ with profile(activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA], record_sh
         campose_inputs = list()
         for i in range(len(ida_aug_conf['cams'])):
             patch = persp_seq[0, :, :, :, i]
-
+            
             # Resize patch for camera pose input
             campose_input = F.interpolate(patch.unsqueeze(0), size=(192, 640), # Image resize with interpolate function
                                           mode='bicubic', align_corners=False) # bicubic, bilinear, ...
             campose_inputs.append(campose_input)
-
+            
             # image normalization for model input
             patch = transforms.ToPILImage()(patch) # time (ms):  5.7
             patch = mmcv.imnormalize(np.array(patch), 
@@ -4013,7 +4078,7 @@ with profile(activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA], record_sh
                                      img_conf['to_rgb']) # time (ms):  5.79
             patch = torch.from_numpy(patch).permute(2, 0, 1) # time (ms):  0.34
             patch = patch.to(device) # time (ms):  1.20
-
+            
             patches.append(patch)
         sweep_patches.append(torch.stack(patches, 0))
         sweep_pose_inputs.append(torch.stack(campose_inputs))
@@ -4029,6 +4094,9 @@ with profile(activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA], record_sh
         #     print(torch.cat(pose_inputs, 1).shape)
         pose_inputs = [pose_enc(torch.cat(pose_inputs, 1))]
         axisangle, translation = pose_dec(pose_inputs)
+        # print("CAM", ida_aug_conf['cams'][cam_idx])
+        # print("pose axis angle", axisangle)
+        # print("pose translation", translation)
         pose = transformation_from_parameters(axisangle[:, 0], translation[:, 0], invert=False)
         # print(f"Pose matrix for image pair {cam_idx}: \n{pose}")
         campose_mats.append(pose)
@@ -4036,173 +4104,327 @@ with profile(activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA], record_sh
     sensor2sensor_mats = list()
     sensor2sensor_mats.append(torch.stack(campose_mats, 0).unsqueeze(0))
     sensor2sensor_mats.append(sensor2sensor_mats[0].inverse())
-
+    
     # 3D object detection
     preds = model(sweep_patches, mats, posenet_outputs=sensor2sensor_mats)
 
-    # ender.record()
-    # torch.cuda.synchronize()
-    # inference_time = starter.elapsed_time(ender)
-    # print("inference time (ms): ", inference_time)
+    ender.record()
+    torch.cuda.synchronize()
+    inference_time = starter.elapsed_time(ender)
+    print("inference time (ms): ", inference_time)
 
-print(prof.key_averages().table(sort_by="self_cpu_time_total", row_limit=30))
-print(prof.key_averages().table(sort_by="self_cuda_time_total", row_limit=30))
+results = model.get_bboxes(preds, img_metas)
+for i in range(len(results)):
+    results[i][0] = results[i][0].detach().cpu().numpy()
+    results[i][1] = results[i][1].detach().cpu().numpy()
+    results[i][2] = results[i][2].detach().cpu().numpy()
+    results[i].append(img_metas[i])
 
+print("찾은 물체 개수: ", len(results[0][:3][0]))
 
+""" format bbox results """
+pred_results = results[0][:3]
+img_metas = results[0][3]
 
+boxes, scores, labels = pred_results
+boxes = boxes
+sample_token = img_metas['token']
+trans = np.array(img_metas['ego2global_translation'])
+rot = Quaternion(img_metas['ego2global_rotation'])
+nusc_annos = {}
+annos = list()
 
+for i, box in enumerate(boxes):
+    name = CLASSES[labels[i]]
+    center = box[:3]
+    wlh = box[[4, 3, 5]]
+    box_yaw = box[6]
+    box_vel = box[7:].tolist()
+    box_vel.append(0)
+    quat = pyquaternion.Quaternion(axis=[0, 0, 1], radians=box_yaw)
+    
+    nusc_box = Box(center, wlh, quat, velocity=box_vel)
+    nusc_box.rotate(rot)
+    nusc_box.translate(trans)
+    
+    if np.sqrt(nusc_box.velocity[0]**2 + nusc_box.velocity[1]**2) > 0.2:
+        if name in ['car','construction_vehicle','bus','truck','trailer']:
+            attr = 'vehicle.moving'
+        elif name in ['bicycle', 'motorcycle']:
+            attr = 'cycle.with_rider'
+        else:
+            attr = DefaultAttribute[name]
+    else:
+        if name in ['pedestrian']:
+            attr = 'pedestrian.standing'
+        elif name in ['bus']:
+            attr = 'vehicle.stopped'
+        else:
+            attr = DefaultAttribute[name]
+    nusc_anno = dict(
+        sample_token=sample_token,
+        translation=nusc_box.center.tolist(),
+        size=nusc_box.wlh.tolist(),
+        rotation=nusc_box.orientation.elements.tolist(),
+        velocity=nusc_box.velocity[:2],
+        detection_name=name,
+        detection_score=float(scores[i]),
+        attribute_name=attr,
+    )
+    annos.append(nusc_anno)
+nusc_annos[sample_token] = annos
 
+modality=dict(use_lidar=False,
+              use_camera=True,
+              use_radar=False,
+              use_map=False,
+              use_external=False)
+nusc_submissions = {
+    'meta': modality,
+    'results': nusc_annos,
+}
 
+""" save results to json file"""
+jsonfile_prefix = os.path.dirname('./outputs/' + exp_name + '/')
+mmcv.mkdir_or_exist(jsonfile_prefix)
+res_path = os.path.join(jsonfile_prefix, 'results_nusc.json')
+print('Results writes to', res_path)
+mmcv.dump(nusc_submissions, res_path)
 
-with profile(activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA], record_shapes=True) as prof:
-# with profile(with_stack=True, use_cuda=True, profile_memory=True) as prof:
-    # starter.record()
+def get_ego_box(box_dict, ego2global_rotation, ego2global_translation):
+    box = Box(
+        box_dict['translation'],
+        box_dict['size'],
+        Quaternion(box_dict['rotation']),
+    )
+    trans = -np.array(ego2global_translation)
+    rot = Quaternion(ego2global_rotation).inverse
+    box.translate(trans)
+    box.rotate(rot)
+    box_xyz = np.array(box.center)
+    box_dxdydz = np.array(box.wlh)[[1, 0, 2]]
+    box_yaw = np.array([box.orientation.yaw_pitch_roll[0]])
+    box_velo = np.array(box.velocity[:2])
+    return np.concatenate([box_xyz, box_dxdydz, box_yaw, box_velo])
 
-    # to GPU memory (시간 측정?)
-    for i, erp_img in enumerate(adj_erp_imgs):
-        adj_erp_imgs[i] = erp_img.to(device)
+def rotate_points_along_z(points, angle):
+    """
+    Args:
+        points: (B, N, 3 + C)
+        angle: (B), angle along z-axis, angle increases x ==> y
+    Returns:
+    """
+    cosa = np.cos(angle)
+    sina = np.sin(angle)
+    zeros = np.zeros(points.shape[0])
+    ones = np.ones(points.shape[0])
+    rot_matrix = np.stack(
+        (cosa, sina, zeros, -sina, cosa, zeros, zeros, zeros, ones),
+        axis=1).reshape(-1, 3, 3)
+    points_rot = np.matmul(points[:, :, 0:3], rot_matrix)
+    points_rot = np.concatenate((points_rot, points[:, :, 3:]), axis=-1)
+    return points_rot
 
-    # Tangent projection with GPU
-    persp_seqs = list()
-    for erp_img in adj_erp_imgs:
-        persp = F.grid_sample(erp_img, grid, mode='bilinear', padding_mode='zeros', align_corners=True)
-        persp_reshape = F.unfold(persp, kernel_size=(tangent_h, tangent_w), stride=(tangent_h, tangent_w))
-        persp_reshape = persp_reshape.reshape(1, 3, tangent_h, tangent_w, n_patch)
-        persp_seqs.append(persp_reshape)
+def get_corners(boxes3d):
+    """
+        7 -------- 4
+       /|         /|
+      6 -------- 5 .
+      | |        | |
+      . 3 -------- 0
+      |/         |/
+      2 -------- 1
+    Args:
+        boxes3d:  (N, 7) [x, y, z, dx, dy, dz, heading],
+            (x, y, z) is the box center
+    Returns:
+    """
+    template = (np.array((
+        [1, 1, -1],
+        [1, -1, -1],
+        [-1, -1, -1],
+        [-1, 1, -1],
+        [1, 1, 1],
+        [1, -1, 1],
+        [-1, -1, 1],
+        [-1, 1, 1],
+    )) / 2)
 
-    # Re-shape patches and prepare camera pose estimation inputs
-    sweep_patches = list()
-    sweep_pose_inputs = list()
-    for persp_seq in persp_seqs:
-        patches = list()
-        campose_inputs = list()
-        for i in range(len(ida_aug_conf['cams'])):
-            patch = persp_seq[0, :, :, :, i]
+    corners3d = np.tile(boxes3d[:, None, 3:6], [1, 8, 1]) * template[None, :, :]
+    corners3d = rotate_points_along_z(corners3d.reshape(-1, 8, 3),boxes3d[:, 6]).reshape(-1, 8, 3)
+    corners3d += boxes3d[:, None, 0:3]
 
-            # Resize patch for camera pose input
-            campose_input = F.interpolate(patch.unsqueeze(0), size=(192, 640), # Image resize with interpolate function
-                                          mode='bicubic', align_corners=False) # bicubic, bilinear, ...
-            campose_inputs.append(campose_input)
+    return corners3d
 
-            # image normalization for model input
-            patch = transforms.ToPILImage()(patch) # time (ms):  5.7
-            patch = mmcv.imnormalize(np.array(patch), 
-                                     np.array(img_conf['img_mean'], np.float32), # TODO check: img_mean, img_std?
-                                     np.array(img_conf['img_std'], np.float32),
-                                     img_conf['to_rgb']) # time (ms):  5.79
-            patch = torch.from_numpy(patch).permute(2, 0, 1) # time (ms):  0.34
-            patch = patch.to(device) # time (ms):  1.20
+def get_bev_lines(corners):
+    return [[[corners[i, 0], corners[(i + 1) % 4, 0]],
+             [corners[i, 1], corners[(i + 1) % 4, 1]]] for i in range(4)]
 
-            patches.append(patch)
-        sweep_patches.append(torch.stack(patches, 0))
-        sweep_pose_inputs.append(torch.stack(campose_inputs))
-    sweep_patches = torch.stack(sweep_patches, 0).unsqueeze(0)
+def get_3d_lines(corners):
+    ret = []
+    for st, ed in [[0, 1], [1, 2], [2, 3], [3, 0], [4, 5], [5, 6], [6, 7],
+                   [7, 4], [0, 4], [1, 5], [2, 6], [3, 7]]:
+        if corners[st, -1] > 0 and corners[ed, -1] > 0:
+            ret.append([[corners[st, 0], corners[ed, 0]],
+                        [corners[st, 1], corners[ed, 1]]])
+    return ret
 
-    # Camera pose estimation
-    campose_mats = list()
-    for cam_idx in range(len(ida_aug_conf['cams'])):
-        source_image = sweep_pose_inputs[0][cam_idx]
-        target_image = sweep_pose_inputs[1][cam_idx]
-        pose_inputs = [source_image, target_image]
-        # if cam_idx == 0:
-        #     print(torch.cat(pose_inputs, 1).shape)
-        pose_inputs = [pose_enc(torch.cat(pose_inputs, 1))]
-        axisangle, translation = pose_dec(pose_inputs)
-        pose = transformation_from_parameters(axisangle[:, 0], translation[:, 0], invert=False)
-        # print(f"Pose matrix for image pair {cam_idx}: \n{pose}")
-        campose_mats.append(pose)
+def get_cam_corners(corners, translation, rotation, cam_intrinsics):
+    cam_corners = corners.copy()
+    cam_corners -= np.array(translation)
+    cam_corners = cam_corners @ Quaternion(rotation).inverse.rotation_matrix.T
+    cam_corners = cam_corners @ np.array(cam_intrinsics).T
+    valid = cam_corners[:, -1] > 0
+    cam_corners /= cam_corners[:, 2:3]
+    cam_corners[~valid] = 0
+    return cam_corners
 
-    sensor2sensor_mats = list()
-    sensor2sensor_mats.append(torch.stack(campose_mats, 0).unsqueeze(0))
-    sensor2sensor_mats.append(sensor2sensor_mats[0].inverse())
+vis_tangent_h = 900 # visualization resolution
+vis_tangent_w = 1600
 
-    # 3D object detection
-    preds = model(sweep_patches, mats, posenet_outputs=sensor2sensor_mats)
+n_patch, vis_grid = createProjectGrid(erp_h, erp_w, vis_tangent_h, vis_tangent_w, num_rows, num_cols, phi_centers, fov)
 
-    # ender.record()
-    # torch.cuda.synchronize()
-    # inference_time = starter.elapsed_time(ender)
-    # print("inference time (ms): ", inference_time)
+# load erp image
+fname = erp_imgs[idx]
+vis_erp_img = cv2.imread(fname, cv2.IMREAD_COLOR)
+vis_erp_img = vis_erp_img.astype(np.float32) / 255
+vis_erp_img = np.transpose(vis_erp_img, [2, 0, 1]) # permutation, 세 번째 axis가 첫 번째 axis로
+vis_erp_img = torch.from_numpy(vis_erp_img) # Create Tensor from numpy array
+vis_erp_img = vis_erp_img.unsqueeze(0) # Increase Tensor dimension by 1
+vis_erp_img = vis_erp_img.to(device)
 
-print(prof.key_averages().table(sort_by="self_cpu_time_total", row_limit=30))
-print(prof.key_averages().table(sort_by="self_cuda_time_total", row_limit=30))
+vis_persp = F.grid_sample(vis_erp_img, vis_grid, mode='bilinear', padding_mode='zeros', align_corners=True)
+vis_persp_reshape = F.unfold(vis_persp, kernel_size=(vis_tangent_h, vis_tangent_w), stride=(vis_tangent_h, vis_tangent_w))
+vis_persp_reshape = vis_persp_reshape.reshape(1, 3, vis_tangent_h, vis_tangent_w, n_patch).cpu()
 
+# Visualize Tangent patches
 
+# patch_num = 0
+# for num_col in num_cols:
+#     patch_num = num_col + patch_num
 
+# _, ax = plt.subplots(2, 3, figsize=(24, 10))
+# j = 0
+# for i in range(patch_num):
+#     patch_cnt = i
+#     if i == 3:
+#         j += 1
+#     i = i % 3
 
+#     cur_patch = vis_persp_reshape[0, :, :, :, patch_cnt].permute(1, 2, 0).numpy()
+#     cur_patch = cur_patch * 255
+#     ax[j, i].imshow(cur_patch[:,:,[2,1,0]].astype(np.uint8), aspect=1)
 
+# plt.show()
 
+result_path = './outputs/bevstereo_ema_da_key2/results_nusc.json'
+save_path = './outputs/det_result_imgs/scene_5/'
+data_root = '../data/nuscenes/'
+results = mmcv.load(result_path)['results']
+show_classes=[
+    'car',
+    'truck',
+    'construction_vehicle',
+    'bus',
+    'trailer',
+    'barrier',
+    'motorcycle',
+    'bicycle',
+    'pedestrian',
+    'traffic_cone',
+]
 
+# IMG_KEYS = ['CAM_FRONT_LEFT', 'CAM_FRONT', 'CAM_FRONT_RIGHT', 'CAM_BACK_RIGHT', 'CAM_BACK', 'CAM_BACK_LEFT']
+IMG_KEYS = ['CAM_BACK_RIGHT', 'CAM_FRONT_LEFT', 'CAM_FRONT', 'CAM_FRONT_RIGHT', 'CAM_BACK_LEFT', 'CAM_BACK']
 
-with profile(activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA], record_shapes=True) as prof:
-# with profile(with_stack=True, use_cuda=True, profile_memory=True) as prof:
-    # starter.record()
+# Get data from dataset
+info = infos[0] # nusc dataset의 idx는 0으로 고정
 
-    # to GPU memory (시간 측정?)
-    for i, erp_img in enumerate(adj_erp_imgs):
-        adj_erp_imgs[i] = erp_img.to(device)
+ego2global_rotation = img_metas['ego2global_rotation']
+ego2global_translation = img_metas['ego2global_translation']
 
-    # Tangent projection with GPU
-    persp_seqs = list()
-    for erp_img in adj_erp_imgs:
-        persp = F.grid_sample(erp_img, grid, mode='bilinear', padding_mode='zeros', align_corners=True)
-        persp_reshape = F.unfold(persp, kernel_size=(tangent_h, tangent_w), stride=(tangent_h, tangent_w))
-        persp_reshape = persp_reshape.reshape(1, 3, tangent_h, tangent_w, n_patch)
-        persp_seqs.append(persp_reshape)
+# Set cameras
+threshold = 0.35
+show_range = 60
 
-    # Re-shape patches and prepare camera pose estimation inputs
-    sweep_patches = list()
-    sweep_pose_inputs = list()
-    for persp_seq in persp_seqs:
-        patches = list()
-        campose_inputs = list()
-        for i in range(len(ida_aug_conf['cams'])):
-            patch = persp_seq[0, :, :, :, i]
+# Get prediction corners
+pred_corners, pred_class = [], []
+for box in results[info['sample_token']]:
+    if box['detection_score'] >= threshold and box['detection_name'] in show_classes:
+        box3d = get_ego_box(box, ego2global_rotation, ego2global_translation)
+        box3d[2] += 0.5 * box3d[5]  # NOTE
+        if np.linalg.norm(box3d[:2]) <= show_range:
+            corners = get_corners(box3d[None])[0]
+            pred_corners.append(corners)
+            pred_class.append(box['detection_name'])
 
-            # Resize patch for camera pose input
-            campose_input = F.interpolate(patch.unsqueeze(0), size=(192, 640), # Image resize with interpolate function
-                                          mode='bicubic', align_corners=False) # bicubic, bilinear, ...
-            campose_inputs.append(campose_input)
+# Set figure size
+plt.figure(figsize=(21, 8))
 
-            # image normalization for model input
-            patch = transforms.ToPILImage()(patch) # time (ms):  5.7
-            patch = mmcv.imnormalize(np.array(patch), 
-                                     np.array(img_conf['img_mean'], np.float32), # TODO check: img_mean, img_std?
-                                     np.array(img_conf['img_std'], np.float32),
-                                     img_conf['to_rgb']) # time (ms):  5.79
-            patch = torch.from_numpy(patch).permute(2, 0, 1) # time (ms):  0.34
-            patch = patch.to(device) # time (ms):  1.20
+for i, k in enumerate(ida_aug_conf['cams']):
+    # Draw camera views
+    fig_idx = i + 1 if i < 3 else i + 1
+    plt.subplot(2, 3, fig_idx)
 
-            patches.append(patch)
-        sweep_patches.append(torch.stack(patches, 0))
-        sweep_pose_inputs.append(torch.stack(campose_inputs))
-    sweep_patches = torch.stack(sweep_patches, 0).unsqueeze(0)
+    # Set camera attributes
+    plt.title(k)
+    plt.axis('off')
+    plt.xlim(0, 1600)
+    plt.ylim(900, 0)
 
-    # Camera pose estimation
-    campose_mats = list()
-    for cam_idx in range(len(ida_aug_conf['cams'])):
-        source_image = sweep_pose_inputs[0][cam_idx]
-        target_image = sweep_pose_inputs[1][cam_idx]
-        pose_inputs = [source_image, target_image]
-        # if cam_idx == 0:
-        #     print(torch.cat(pose_inputs, 1).shape)
-        pose_inputs = [pose_enc(torch.cat(pose_inputs, 1))]
-        axisangle, translation = pose_dec(pose_inputs)
-        pose = transformation_from_parameters(axisangle[:, 0], translation[:, 0], invert=False)
-        # print(f"Pose matrix for image pair {cam_idx}: \n{pose}")
-        campose_mats.append(pose)
+    cur_patch = vis_persp_reshape[0, :, :, :, i].permute(1, 2, 0).numpy()
+    cur_patch = cur_patch * 255
+    img = cur_patch[:,:,[2,1,0]].astype(np.uint8)
+    
+    # Draw images
+    plt.imshow(img)
 
-    sensor2sensor_mats = list()
-    sensor2sensor_mats.append(torch.stack(campose_mats, 0).unsqueeze(0))
-    sensor2sensor_mats.append(sensor2sensor_mats[0].inverse())
+    # Draw 3D predictions
+    for corners, cls in zip(pred_corners, pred_class):
+        
+        if dataset.sensor2ego_trans is None:
+            sensor2ego_trans = info['cam_infos'][k]['calibrated_sensor']['translation']
+        else:
+            sensor2ego_trans = dataset.sensor2ego_trans
+        
+        if dataset.sensor2ego_rot_eulers is None:
+            sensor2ego_rot = info['cam_infos'][k]['calibrated_sensor']['rotation']
+        else:
+            sensor2ego_degrees = dataset.sensor2ego_rot_eulers[k]
+            sensor2ego_radians = [degree * np.pi / 180 for degree in sensor2ego_degrees]
+            # print(sensor2ego_degrees)
+            sensor2ego_q = Quaternion(get_quaternion_from_euler(sensor2ego_radians))
+            sensor2ego_rot = sensor2ego_q
+        
+        if dataset.tangent_intrinsics is None:
+            intrinsic = info['cam_infos'][k]['calibrated_sensor']['camera_intrinsic']
+        else:
+            intrinsic = tangent_intrinsics[k]
+            
+        cam_corners = get_cam_corners(corners, sensor2ego_trans, sensor2ego_rot, intrinsic)
+        # cam_corners = get_cam_corners(
+        #         corners,
+        #         info['cam_infos'][k]['calibrated_sensor']['translation'],
+        #         info['cam_infos'][k]['calibrated_sensor']['rotation'],
+        #         info['cam_infos'][k]['calibrated_sensor']['camera_intrinsic'])
+        
+        lines = get_3d_lines(cam_corners)
+        for line in lines:
+            plt.plot(line[0],
+                     line[1],
+                     c=cm.get_cmap('tab10')(show_classes.index(cls)))
 
-    # 3D object detection
-    preds = model(sweep_patches, mats, posenet_outputs=sensor2sensor_mats)
+# Set legend
+handles, labels = plt.gca().get_legend_handles_labels()
+by_label = dict(zip(labels, handles))
+plt.legend(by_label.values(),
+           by_label.keys(),
+           loc='upper right',
+           framealpha=1)
 
-    # ender.record()
-    # torch.cuda.synchronize()
-    # inference_time = starter.elapsed_time(ender)
-    # print("inference time (ms): ", inference_time)
+plt.tight_layout(w_pad=0, h_pad=2)
+plt.savefig(save_path+"output_"+str(idx)+".jpg")
+# plt.show()
 
-print(prof.key_averages().table(sort_by="self_cpu_time_total", row_limit=30))
-print(prof.key_averages().table(sort_by="self_cuda_time_total", row_limit=30))
+plt.close()
+
