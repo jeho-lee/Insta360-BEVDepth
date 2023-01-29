@@ -1,3 +1,5 @@
+device = 'cuda:1'
+
 import os
 from functools import partial
 import numba
@@ -52,7 +54,7 @@ except ImportError:
 
 from mmdet3d.core.bbox.structures.lidar_box3d import LiDARInstance3DBoxes
 from nuscenes.utils.data_classes import Box, LidarPointCloud
-from nuscenes.utils.geometry_utils import view_points
+from nuscenes.utils.geometry_utils import view_points, box_in_image, BoxVisibility, transform_matrix
 from PIL import Image
 from pyquaternion import Quaternion
 import pyquaternion
@@ -71,8 +73,6 @@ from math import pi
 from mpl_toolkits.mplot3d import Axes3D
 from skimage.metrics import structural_similarity as ssim
 from skimage.metrics import mean_squared_error
-
-from torch.profiler import profile, record_function, ProfilerActivity
 
 infos_path = '../data/nuscenes/nuscenes_infos_val.pkl'
 infos = mmcv.load(infos_path)
@@ -371,7 +371,7 @@ class BaseLSSFPN(nn.Module):
         return img_feat_with_depth
 
     def create_frustum(self):
-        """Generate frustum"""
+        """Generate frustum: downsample 하는 것을 고려해서 frustum 만듦 (final dim에 맞게)"""
         # make grid in image plane
         ogfH, ogfW = self.final_dim
         fH, fW = ogfH // self.downsample_factor, ogfW // self.downsample_factor
@@ -401,18 +401,22 @@ class BaseLSSFPN(nn.Module):
         """
         batch_size, num_cams, _, _ = sensor2ego_mat.shape
 
+        """ frustum은 704, 256에 맞게 생성되었는데, 
+        frustum 상의 camera coord. points를 ego coord.로 정확히 옮기기 위해
+        ida 적용 이전 원래대로 돌려놓고 camera coord. => ego coord. 수행 """
         # undo post-transformation
         # B x N x D x H x W x 3
         points = self.frustum
         ida_mat = ida_mat.view(batch_size, num_cams, 1, 1, 1, 4, 4)
         points = ida_mat.inverse().matmul(points.unsqueeze(-1))
+        
         # cam_to_ego
         points = torch.cat(
             (points[:, :, :, :, :, :2] * points[:, :, :, :, :, 2:3],
              points[:, :, :, :, :, 2:]), 5)
-
         combine = sensor2ego_mat.matmul(torch.inverse(intrin_mat))
         points = combine.view(batch_size, num_cams, 1, 1, 1, 4, 4).matmul(points)
+        
         if bda_mat is not None:
             bda_mat = bda_mat.unsqueeze(1).repeat(1, num_cams, 1, 1).view(
                 batch_size, num_cams, 1, 1, 1, 4, 4)
@@ -465,8 +469,7 @@ class BaseLSSFPN(nn.Module):
         Returns:
             Tensor: BEV feature map.
         """
-        batch_size, num_sweeps, num_cams, num_channels, img_height, \
-            img_width = sweep_imgs.shape
+        batch_size, num_sweeps, num_cams, num_channels, img_height, img_width = sweep_imgs.shape
         img_feats = self.get_cam_feats(sweep_imgs)
         source_features = img_feats[:, 0, ...]
         depth_feature = self._forward_depth_net(
@@ -565,6 +568,7 @@ class BaseLSSFPN(nn.Module):
         else:
             return torch.cat(ret_feature_list, 1)
 
+        
 """from layers/backbones/bevstereo_lss_fpn.py"""
 
 class ConvBnReLU3D(nn.Module):
@@ -975,8 +979,7 @@ class BEVStereoLSSFPN(BaseLSSFPN):
                                           key_ida_mats.shape[2:]).inverse(
                                           ).unsqueeze(1) @ points.unsqueeze(-1)
             # Convert points from pixel coord to key camera coord.
-            points[..., :3, :] *= depth_sample.reshape(
-                batch_size_with_num_cams, -1, 1, 1)
+            points[..., :3, :] *= depth_sample.reshape(batch_size_with_num_cams, -1, 1, 1)
             num_depth = frustum.shape[1]
             points = (key_intrin_mats.reshape(
                 batch_size_with_num_cams, *
@@ -989,8 +992,7 @@ class BEVStereoLSSFPN(BaseLSSFPN):
                 batch_size_with_num_cams, *
                 sweep_intrin_mats.shape[2:]).unsqueeze(1) @ points)
             # points in sweep pixel coord.
-            points[..., :2, :] = points[..., :2, :] / points[
-                ..., 2:3, :]  # [B, 2, Ndepth, H*W]
+            points[..., :2, :] = points[..., :2, :] / points[..., 2:3, :]  # [B, 2, Ndepth, H*W]
 
             points = (sweep_ida_mats.reshape(
                 batch_size_with_num_cams, *
@@ -999,12 +1001,9 @@ class BEVStereoLSSFPN(BaseLSSFPN):
             points[..., 0][neg_mask] = width * self.stereo_downsample_factor
             points[..., 1][neg_mask] = height * self.stereo_downsample_factor
             points[..., 2][neg_mask] = 1
-            proj_x_normalized = points[..., 0] / (
-                (width * self.stereo_downsample_factor - 1) / 2) - 1
-            proj_y_normalized = points[..., 1] / (
-                (height * self.stereo_downsample_factor - 1) / 2) - 1
-            grid = torch.stack([proj_x_normalized, proj_y_normalized],
-                               dim=2)  # [B, Ndepth, H*W, 2]
+            proj_x_normalized = points[..., 0] / ((width * self.stereo_downsample_factor - 1) / 2) - 1
+            proj_y_normalized = points[..., 1] / ((height * self.stereo_downsample_factor - 1) / 2) - 1
+            grid = torch.stack([proj_x_normalized, proj_y_normalized], dim=2)  # [B, Ndepth, H*W, 2]
 
         warped_stereo_fea = F.grid_sample(
             stereo_feat,
@@ -1418,18 +1417,22 @@ class BEVStereoLSSFPN(BaseLSSFPN):
         for ref_idx in range(num_sweeps):
             sensor2sensor_mats = list()
             for src_idx in range(num_sweeps):
+                
                 """ Original Code """
                 # ref2keysensor_mats = mats_dict['sensor2sensor_mats'][:, ref_idx, ...].inverse()
                 # key2srcsensor_mats = mats_dict['sensor2sensor_mats'][:, src_idx, ...]
                 # ref2srcsensor_mats = key2srcsensor_mats @ ref2keysensor_mats
                 # sensor2sensor_mats.append(ref2srcsensor_mats)
+                
                 """ Modification for PoseNet """
                 if posenet_outputs is not None:
+                    print("Use posenet output")
                     if ref_idx < src_idx:
                         ref2srcsensor_mats = posenet_outputs[0]
                     else:
                         ref2srcsensor_mats = posenet_outputs[1]
                 else:
+                    print("Use Nusc pose data")
                     ref2keysensor_mats = mats_dict['sensor2sensor_mats'][:, ref_idx, ...].inverse()
                     key2srcsensor_mats = mats_dict['sensor2sensor_mats'][:, src_idx, ...]
                     ref2srcsensor_mats = key2srcsensor_mats @ ref2keysensor_mats
@@ -1438,6 +1441,7 @@ class BEVStereoLSSFPN(BaseLSSFPN):
                 #     print("ref_idx: ", ref_idx, " src_idx: ", src_idx)
                 #     print("ref2srcsensor_mats: \n", ref2srcsensor_mats)
                 #     print("shape: ", ref2srcsensor_mats.shape)
+                
             if ref_idx == 0:
                 # last iteration on stage 1 does not have propagation (photometric consistency filtering)
                 if self.use_mask:
@@ -1533,7 +1537,6 @@ class BEVStereoLSSFPN(BaseLSSFPN):
             return torch.cat(ret_feature_list, 1), depth_score_all_sweeps[0]
         else:
             return torch.cat(ret_feature_list, 1)
-        
 
 bev_backbone_conf = dict(
     type='ResNet',
@@ -2014,7 +2017,6 @@ class BEVDepthHead(CenterHead):
             ret_list.append([bboxes, scores, labels])
         return ret_list
 
-    
 class BEVStereo(nn.Module):
     """Source code of `BEVStereo`, `https://arxiv.org/abs/2209.10248`.
 
@@ -2123,7 +2125,6 @@ class BEVStereo(nn.Module):
             list[dict]: Decoded bbox, scores and labels after nms.
         """
         return self.head.get_bboxes(preds_dicts, img_metas, img, rescale)
-
 
 H = 900
 W = 1600
@@ -2822,100 +2823,6 @@ class PoseDecoder(nn.Module):
 
         return axisangle, translation
 
-def createProjectGrid(tangent_h, tangent_w, num_rows, num_cols, phi_centers, fov):
-    height, width = tangent_h, tangent_w
-
-    FOV = fov
-    FOV = [FOV[0] / 360.0, FOV[1] / 180.0]
-    FOV = torch.tensor(FOV, dtype=torch.float32)
-
-    PI = math.pi
-    PI_2 = math.pi * 0.5
-    PI2 = math.pi * 2
-
-    yy, xx = torch.meshgrid(torch.linspace(0, 1, height), torch.linspace(0, 1, width))
-    screen_points = torch.stack([xx.flatten(), yy.flatten()], -1)
-    
-    num_rows = num_rows
-    num_cols = num_cols
-    phi_centers = phi_centers
-
-    phi_interval = 180 // num_rows # 45도
-    all_combos = []
-    erp_mask = []
-    
-    for i, n_cols in enumerate(num_cols):
-        for j in np.arange(n_cols): # 0 ~ num_cols.length
-            theta_interval = 360 / n_cols # 현재 row (위도)에서 쪼개질 경도 (col)의 위치
-            theta_center = j * theta_interval + theta_interval / 2
-            center = [theta_center, phi_centers[i]] # 각 tangent image의 center position
-            
-            # print(str(j) + " th theta center " + str(theta_center) + " phi center " + str(phi_centers[i]))
-            
-            all_combos.append(center)
-
-            # 구좌표계에서의 tangent image가 차지하는 영역에 대한 좌표들
-            up = phi_centers[i] + phi_interval / 2
-            down = phi_centers[i] - phi_interval / 2
-            left = theta_center - theta_interval / 2
-            right = theta_center + theta_interval / 2
-
-            # ERP image에서 현재 tangent가 차지하는 영역에 대한 pixel 위치들
-            up = int((up + 90) / 180 * erp_h)
-            down = int((down + 90) / 180 * erp_h)
-            left = int(left / 360 * erp_w)
-            right = int(right / 360 * erp_w)
-
-            # ERP 이미지에서 현재 tangent image 영역에 해당하는 부분에 1로 마스킹
-            mask = np.zeros((erp_h, erp_w), dtype=int)
-            mask[down:up, left:right] = 1
-            erp_mask.append(mask)
-
-    all_combos = np.vstack(all_combos)
-    shifts = np.arange(all_combos.shape[0]) * width
-    shifts = torch.from_numpy(shifts).float()
-    erp_mask = np.stack(erp_mask)
-    erp_mask = torch.from_numpy(erp_mask).float()
-    n_patch = all_combos.shape[0]
-    
-    center_point = torch.from_numpy(all_combos).float()  # -180 to 180, -90 to 90
-    center_point[:, 0] = (center_point[:, 0]) / 360  #0 to 1
-    center_point[:, 1] = (center_point[:, 1] + 90) / 180  #0 to 1
-
-    cp = center_point * 2 - 1
-    cp[:, 0] = cp[:, 0] * PI
-    cp[:, 1] = cp[:, 1] * PI_2
-    cp = cp.unsqueeze(1)
-
-    convertedCoord = screen_points * 2 - 1
-    convertedCoord[:, 0] = convertedCoord[:, 0] * PI
-    convertedCoord[:, 1] = convertedCoord[:, 1] * PI_2
-    convertedCoord = convertedCoord * (torch.ones(screen_points.shape, dtype=torch.float32) * FOV)
-    convertedCoord = convertedCoord.unsqueeze(0).repeat(cp.shape[0], 1, 1)
-    
-    x = convertedCoord[:, :, 0]
-    y = convertedCoord[:, :, 1]
-
-    rou = torch.sqrt(x ** 2 + y ** 2)
-    c = torch.atan(rou)
-    sin_c = torch.sin(c)
-    cos_c = torch.cos(c)
-    lat = torch.asin(cos_c * torch.sin(cp[:, :, 1]) + (y * sin_c * torch.cos(cp[:, :, 1])) / rou)
-    lon = cp[:, :, 0] + torch.atan2(x * sin_c, rou * torch.cos(cp[:, :, 1]) * cos_c - y * torch.sin(cp[:, :, 1]) * sin_c)
-    lat_new = lat / PI_2
-    lon_new = lon / PI
-    lon_new[lon_new > 1] -= 2
-    lon_new[lon_new<-1] += 2
-
-    lon_new = lon_new.view(1, n_patch, height, width).permute(0, 2, 1, 3).contiguous().view(height, n_patch*width)
-    lat_new = lat_new.view(1, n_patch, height, width).permute(0, 2, 1, 3).contiguous().view(height, n_patch*width)
-    
-    grid = torch.stack([lon_new, lat_new], -1)
-    grid = grid.unsqueeze(0)
-    grid = grid.to(device)
-
-    return n_patch, grid
-
 map_name_from_general_to_detection = {
     'human.pedestrian.adult': 'pedestrian',
     'human.pedestrian.child': 'pedestrian',
@@ -3002,6 +2909,7 @@ def get_rot(h):
         [-np.sin(h), np.cos(h)],
     ])
 
+""" test일 때는 flip 및 rotate하는 augmentation은 하지 않고, 오직 resize와 crop만 적용됨 """ 
 def img_transform(img, resize, resize_dims, crop, flip, rotate):
     ida_rot = torch.eye(2)
     ida_tran = torch.zeros(2)
@@ -3013,23 +2921,28 @@ def img_transform(img, resize, resize_dims, crop, flip, rotate):
     img = img.rotate(rotate)
 
     # post-homography transformation
-    ida_rot *= resize
-    ida_tran -= torch.Tensor(crop[:2])
-    if flip:
+    ida_rot *= resize # resize == 704 / 1600 == 0.44
+    ida_tran -= torch.Tensor(crop[:2]) # crop: (0, 140, 704, 396), crop[:2]: (0, 140) => 즉 tran은 y축 방향으로 -140
+    if flip: # test time에는 X
         A = torch.Tensor([[-1, 0], [0, 1]])
         b = torch.Tensor([crop[2] - crop[0], 0])
         ida_rot = A.matmul(ida_rot)
         ida_tran = A.matmul(ida_tran) + b
-    A = get_rot(rotate / 180 * np.pi)
-    b = torch.Tensor([crop[2] - crop[0], crop[3] - crop[1]]) / 2
-    b = A.matmul(-b) + b
-    ida_rot = A.matmul(ida_rot)
-    ida_tran = A.matmul(ida_tran) + b
+    A = get_rot(rotate / 180 * np.pi) # 0일때 (test) identity matrix
+    b = torch.Tensor([crop[2] - crop[0], crop[3] - crop[1]]) / 2 # [704, 256] / 2 = [352, 128]
+    b = A.matmul(-b) + b # A는 단위행렬이므로, 결국엔 -b + b, 즉 영행렬
+    ida_rot = A.matmul(ida_rot) # [[0.44, 0], [0, 0.44]]
+    ida_tran = A.matmul(ida_tran) + b # A @ ida_tran + b => tensor([   0., -140.])
     ida_mat = ida_rot.new_zeros(4, 4)
     ida_mat[3, 3] = 1
     ida_mat[2, 2] = 1
     ida_mat[:2, :2] = ida_rot
     ida_mat[:2, 3] = ida_tran
+    # ida_mat
+    # tensor([[   0.4400,    0.0000,    0.0000,    0.0000],
+    #         [   0.0000,    0.4400,    0.0000, -140.0000],
+    #         [   0.0000,    0.0000,    1.0000,    0.0000],
+    #         [   0.0000,    0.0000,    0.0000,    1.0000]])
     return img, ida_mat
 
 
@@ -3253,8 +3166,13 @@ class NuscDetDataset(Dataset):
                  is_train,
                  
                  # Dataset customization
-                 tangent_intrinsics,
-                 sensor2ego_rot_eulers,
+                 tangent_intrinsics=None,
+                 sensor2ego_rot_eulers=None,
+                 sensor2ego_trans=None,
+                 ego2global_rotation=None,
+                 ego2global_translation=None,
+                 
+                 infos=None,
                  
                  use_cbgs=False,
                  num_sweeps=1,
@@ -3285,12 +3203,16 @@ class NuscDetDataset(Dataset):
                 default: False.
         """
         super().__init__()
-        if isinstance(info_paths, list):
-            self.infos = list()
-            for info_path in info_paths:
-                self.infos.extend(mmcv.load(info_path))
+        if infos is None:
+            if isinstance(info_paths, list):
+                self.infos = list()
+                for info_path in info_paths:
+                    self.infos.extend(mmcv.load(info_path))
+            else:
+                self.infos = mmcv.load(info_paths)
         else:
-            self.infos = mmcv.load(info_paths)
+            self.infos = infos
+        
         self.is_train = is_train
         self.ida_aug_conf = ida_aug_conf
         self.bda_aug_conf = bda_aug_conf
@@ -3318,6 +3240,9 @@ class NuscDetDataset(Dataset):
         # Dataset customization
         self.tangent_intrinsics = tangent_intrinsics
         self.sensor2ego_rot_eulers = sensor2ego_rot_eulers
+        self.sensor2ego_trans = sensor2ego_trans
+        self.ego2global_rotation = ego2global_rotation
+        self.ego2global_translation = ego2global_translation
 
     def _get_sample_indices(self):
         """Load annotations from ann_file.
@@ -3465,16 +3390,26 @@ class NuscDetDataset(Dataset):
                 img = Image.open(os.path.join(self.data_root, cam_info[cam]['filename']))
                 # img = Image.fromarray(img)
                 
-                """변경. sensor2ego """
-                # w, x, y, z = cam_info[cam]['calibrated_sensor']['rotation'] # 기존
-                sensor2ego_degrees = self.sensor2ego_rot_eulers[cam]
-                sensor2ego_radians = [degree * np.pi / 180 for degree in sensor2ego_degrees]
-                sensor2ego_q = Quaternion(get_quaternion_from_euler(sensor2ego_radians))
-                w, x, y, z = sensor2ego_q
+                # print("original", img.size)
+                # display(img)
                 
                 # sweep sensor to sweep ego
+                """변경. sensor2ego """
+                if self.sensor2ego_rot_eulers is None:
+                    w, x, y, z = cam_info[cam]['calibrated_sensor']['rotation'] # 기존
+                else:
+                    sensor2ego_degrees = self.sensor2ego_rot_eulers[cam]
+                    sensor2ego_radians = [degree * np.pi / 180 for degree in sensor2ego_degrees]
+                    sensor2ego_q = Quaternion(get_quaternion_from_euler(sensor2ego_radians))
+                    w, x, y, z = sensor2ego_q
+
                 sweepsensor2sweepego_rot = torch.Tensor(Quaternion(w, x, y, z).rotation_matrix)
-                sweepsensor2sweepego_tran = torch.Tensor(cam_info[cam]['calibrated_sensor']['translation'])
+                
+                if self.sensor2ego_trans is None:
+                    sweepsensor2sweepego_tran = torch.Tensor(cam_info[cam]['calibrated_sensor']['translation'])
+                else:
+                    sweepsensor2sweepego_tran = torch.Tensor(self.sensor2ego_trans) # 변경
+                
                 sweepsensor2sweepego = sweepsensor2sweepego_rot.new_zeros((4, 4))
                 sweepsensor2sweepego[3, 3] = 1
                 sweepsensor2sweepego[:3, :3] = sweepsensor2sweepego_rot
@@ -3501,14 +3436,20 @@ class NuscDetDataset(Dataset):
 
                 # cur ego to sensor
                 """변경. sensor2ego """
-                # w, x, y, z = key_info[cam]['calibrated_sensor']['rotation'] # 기존
-                sensor2ego_degrees = self.sensor2ego_rot_eulers[cam]
-                sensor2ego_radians = [degree * np.pi / 180 for degree in sensor2ego_degrees]
-                sensor2ego_q = Quaternion(get_quaternion_from_euler(sensor2ego_radians))
-                w, x, y, z = sensor2ego_q
-                
+                if self.sensor2ego_rot_eulers is None:
+                    w, x, y, z = key_info[cam]['calibrated_sensor']['rotation'] # 기존
+                else:
+                    sensor2ego_degrees = self.sensor2ego_rot_eulers[cam]
+                    sensor2ego_radians = [degree * np.pi / 180 for degree in sensor2ego_degrees]
+                    sensor2ego_q = Quaternion(get_quaternion_from_euler(sensor2ego_radians))
+                    w, x, y, z = sensor2ego_q
                 keysensor2keyego_rot = torch.Tensor(Quaternion(w, x, y, z).rotation_matrix)
-                keysensor2keyego_tran = torch.Tensor(key_info[cam]['calibrated_sensor']['translation'])
+                
+                if self.sensor2ego_trans is None:
+                    keysensor2keyego_tran = torch.Tensor(key_info[cam]['calibrated_sensor']['translation'])
+                else:
+                    keysensor2keyego_tran = torch.Tensor(self.sensor2ego_trans) # 변경
+                
                 keysensor2keyego = keysensor2keyego_rot.new_zeros((4, 4))
                 keysensor2keyego[3, 3] = 1
                 keysensor2keyego[:3, :3] = keysensor2keyego_rot
@@ -3523,13 +3464,13 @@ class NuscDetDataset(Dataset):
                 sensor2ego_mats.append(sweepsensor2keyego)
                 sensor2sensor_mats.append(keysensor2sweepsensor)
                 
-                """변경. intrinsics """
-                # intrin_mat = torch.zeros((4, 4))
-                # intrin_mat[3, 3] = 1
-                # intrin_mat[:3, :3] = torch.Tensor(cam_info[cam]['calibrated_sensor']['camera_intrinsic'])
+                """ 변경. intrinsics """
                 intrin_mat = torch.zeros((4, 4))
                 intrin_mat[3, 3] = 1
-                intrin_mat[:3, :3] = torch.Tensor(self.tangent_intrinsics[cam])
+                if self.tangent_intrinsics is None:
+                    intrin_mat[:3, :3] = torch.Tensor(cam_info[cam]['calibrated_sensor']['camera_intrinsic'])
+                else:
+                    intrin_mat[:3, :3] = torch.Tensor(self.tangent_intrinsics[cam])
                 
                 if self.return_depth and (self.use_fusion or sweep_idx == 0):
                     point_depth = self.get_lidar_depth(
@@ -3560,6 +3501,9 @@ class NuscDetDataset(Dataset):
                     rotate=rotate_ida,
                 )
                 
+                # print("resized", img.size)
+                # display(img)
+                
                 ida_mats.append(ida_mat)
                 img = mmcv.imnormalize(np.array(img), self.img_mean, self.img_std, self.to_rgb)
                 img = torch.from_numpy(img).permute(2, 0, 1)
@@ -3578,11 +3522,16 @@ class NuscDetDataset(Dataset):
             sweep_timestamps.append(torch.tensor(timestamps))
             if self.return_depth:
                 sweep_lidar_depth.append(torch.stack(lidar_depth))
-        # Get mean pose of all cams.
-        ego2global_rotation = np.mean(
-            [key_info[cam]['ego_pose']['rotation'] for cam in cams], 0)
-        ego2global_translation = np.mean(
-            [key_info[cam]['ego_pose']['translation'] for cam in cams], 0)
+                
+        """ ego pose 변경 """
+        if self.ego2global_rotation is None and self.ego2global_translation is None:
+            # Get mean pose of all cams
+            ego2global_rotation = np.mean([key_info[cam]['ego_pose']['rotation'] for cam in cams], 0)
+            ego2global_translation = np.mean([key_info[cam]['ego_pose']['translation'] for cam in cams], 0)
+        else:
+            ego2global_rotation = self.ego2global_rotation
+            ego2global_translation = self.ego2global_translation
+        
         img_metas = dict(
             box_type_3d=LiDARInstance3DBoxes,
             ego2global_translation=ego2global_translation,
@@ -3775,11 +3724,10 @@ class NuscDetDataset(Dataset):
             return len(self.sample_indices)
         else:
             return len(self.infos)
-
+        
 # @@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@
 # device = 'cuda:2'
 # device = 'cpu'
-device = 'cuda:0'
 # @@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@
 
 """ 1. Init BEVStereo model and hyper-params """
@@ -3827,7 +3775,7 @@ head_conf['train_cfg']['code_weight'] = [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0,
 head_conf['test_cfg']['thresh_scale'] = [0.6, 0.4, 0.4, 0.7, 0.8, 0.9]
 head_conf['test_cfg']['nms_type'] = 'size_aware_circle'
 
-# ckpt with data augmentation
+# ckpt with depth aggregation
 backbone_conf['use_da'] = True
 data_use_cbgs = True
 basic_lr_per_img = 2e-4 / 32
@@ -3863,38 +3811,8 @@ pose_enc.to(device)
 pose_dec.to(device)
 print("BEVStereo and PoseNet loaded")
 
-""" 3. Init Tangent Projection Grid """
-num_rows = 1
-num_cols = [6]
-phi_centers = [0]
 
-# fov 가로/세로 비율과 nuscenes input의 width/height 비율이 같음
-# 900/1600, 396/704: 1.777777...
-# 위 비율에 맞춰서 tangent patch size 결정하기
-tangent_h = 256 # 256 # 900 # 396
-tangent_w = 704 # 704 # 1600 # 704
-fov  = [70, 39.375]
-erp_h, erp_w = 1920, 3840
-
-n_patch, grid = createProjectGrid(erp_h, erp_w, tangent_h, tangent_w, num_rows, num_cols, phi_centers, fov)
-
-""" Init Insta360 ERP Dataset Meta-data """
-
-scene_dir = "scene_1/"
-erp_img_root = "../data/daejeon_road_outdoor/erp_images/"
-# filename = "frame_0001.jpg"
-# erp_img_path = os.path.join(erp_img_root, scene_dir, filename)
-
-erp_imgs = []
-for filename in os.listdir(erp_img_root + scene_dir):
-    erp_imgs.append(os.path.join(erp_img_root, scene_dir, filename))
-    
-# ida_aug_conf['cams'] = ['CAM_BACK_RIGHT',
-#                         'CAM_FRONT_LEFT',
-#                         'CAM_FRONT',
-#                         'CAM_FRONT_RIGHT',
-#                         'CAM_BACK_LEFT',
-#                         'CAM_BACK']
+""" Nusc """
 
 ida_aug_conf['cams'] = ['CAM_FRONT_LEFT',
                         'CAM_FRONT',
@@ -3902,79 +3820,6 @@ ida_aug_conf['cams'] = ['CAM_FRONT_LEFT',
                         'CAM_BACK_LEFT',
                         'CAM_BACK',
                         'CAM_BACK_RIGHT']
-
-"""sensor2ego (calibrated_sensor) rotation degree를 insta360에 맞게 변경"""
-# [roll, pitch, yaw]
-
-# BEVFormer에서 사용한 sensor2lidar
-# sensor2ego_rot_eulers = {'CAM_FRONT': [-88.89452145820958, -0.34991764317283675, 0.0],
-#                          'CAM_FRONT_RIGHT': [-89.73833720738743, 1.5337073678165962, -60.0],
-#                          'CAM_FRONT_LEFT': [-89.2717432442176, -1.221029004801636, 60.0],
-#                          'CAM_BACK': [-90.4448247670561, 0.552239989680819, 180.0],
-#                          'CAM_BACK_LEFT': [-91.67728722938543, -1.4284019448799024, 120.0],
-#                          'CAM_BACK_RIGHT': [-91.13862482181912, 2.0544464501438036, -120.0]}
-
-# BEVFormer에서 사용한 sensor2ego
-# sensor2ego_rot_eulers = {'CAM_FRONT': [-90.32322642770005, -0.046127194838589326, -90.0],
-#                          'CAM_FRONT_RIGHT': [-90.7820235885, 0.5188438566959973, -150.0],
-#                          'CAM_FRONT_LEFT': [-89.85977500319999, 0.12143609391200436, -30.0],
-#                          'CAM_BACK': [-89.0405962694, 0.22919685786400154, 90.0],
-#                          'CAM_BACK_LEFT': [-90.91736319750001, -0.21518275753700122, 30.0],
-#                          'CAM_BACK_RIGHT': [-90.93206677999999, 0.6190947610589966, -210.0]}
-
-# sensor2ego_rot_eulers = {'CAM_FRONT': [-90.32322642770005, -0.046127194838589326, -60.0],
-#                          'CAM_FRONT_RIGHT': [-90.7820235885, 0.5188438566959973, -120.0],
-#                          'CAM_FRONT_LEFT': [-89.85977500319999, 0.12143609391200436, -0.0],
-#                          'CAM_BACK': [-89.0405962694, 0.22919685786400154, 120.0],
-#                          'CAM_BACK_LEFT': [-90.91736319750001, -0.21518275753700122, 60.0],
-#                          'CAM_BACK_RIGHT': [-90.93206677999999, 0.6190947610589966, -180.0]}
-
-sensor2ego_rot_eulers = {'CAM_FRONT': [-90.0, 0.0, 0.0],
-                         'CAM_FRONT_RIGHT': [-90.0, 0.0, -60.0],
-                         'CAM_FRONT_LEFT': [-90.0, 0.0, 60.0],
-                         'CAM_BACK': [-90.0, 0.0, 180.0],
-                         'CAM_BACK_LEFT': [-90.0, 0.0, 120.0],
-                         'CAM_BACK_RIGHT': [-90.0, 0.0, -120.0]}
-
-# sensor2ego_rot_eulers = {'CAM_FRONT': [-90.0, 0.0, 90.0],
-#                          'CAM_FRONT_RIGHT': [-90.0, 0.0, 30.0],
-#                          'CAM_FRONT_LEFT': [-90.0, 0.0, 150.0],
-#                          'CAM_BACK': [-90.0, 0.0, -90.0],
-#                          'CAM_BACK_LEFT': [-90.0, 0.0, -150.0],
-#                          'CAM_BACK_RIGHT': [-90.0, 0.0, -30.0]}
-
-# sensor2ego_rots = [] # tcam2egocam_rots
-# for i in range(len(ida_aug_conf['cams'])):
-#     cam = ida_aug_conf['cams'][i]
-#     sensor2ego_degrees = sensor2ego_euler_degrees[cam]
-#     sensor2ego_radians = [degree * np.pi / 180 for degree in sensor2ego_degrees]
-#     sensor2ego_q = Quaternion(get_quaternion_from_euler(sensor2ego_radians))
-#     sensor2ego_r_mat = sensor2ego_q.rotation_matrix
-#     sensor2ego_rots.append(sensor2ego_r_mat)
-
-#     # 확인
-#     # radians = euler_from_quaternion(sensor2ego_q)
-#     # print(cam, sensor2ego_q)
-#     # print(cam, [euler / np.pi * 180 for euler in radians])
-
-sensor2ego_trans = [0.0, 0.0, 0.0]
-
-ego2global_rotation = np.array([1.0, 0.0, 0.0, 0.0])
-ego2global_translation = np.array([0.0, 0.0, 0.0])
-
-# tangent_intrinsics = {'CAM_FRONT': [[1343.45019, 0.0, 820.183159], [0.0, 1280.23476, 442.850375], [0.0, 0.0, 1.0]],
-#                       'CAM_FRONT_RIGHT': [[1318.58226, 0.0, 748.797979], [0.0, 1307.51676, 433.683573], [0.0, 0.0, 1.0]],
-#                       'CAM_FRONT_LEFT': [[1326.72632, 0.0, 789.918136], [0.0, 1313.8785, 447.051964], [0.0, 0.0, 1.0]],
-#                       'CAM_BACK': [[1318.10344, 0.0, 760.164664], [0.0, 1307.00893, 433.459504], [0.0, 0.0, 1.0]],
-#                       'CAM_BACK_LEFT': [[1329.78802, 0.0, 794.247861], [0.0, 1318.65546, 422.083681], [0.0, 0.0, 1.0]],
-#                       'CAM_BACK_RIGHT': [[1342.27544, 0.0, 790.251605], [0.0, 1326.28658, 452.853747], [0.0, 0.0, 1.0]]}
-
-tangent_intrinsics = {'CAM_FRONT': [[1250.45019, 0.0, 820.183159], [0.0, 1250.23476, 442.850375], [0.0, 0.0, 1.0]],
-                      'CAM_FRONT_RIGHT': [[1250.58226, 0.0, 748.797979], [0.0, 1250.51676, 433.683573], [0.0, 0.0, 1.0]],
-                      'CAM_FRONT_LEFT': [[1250.72632, 0.0, 789.918136], [0.0, 1250.8785, 447.051964], [0.0, 0.0, 1.0]],
-                      'CAM_BACK': [[1250.10344, 0.0, 760.164664], [0.0, 1250.00893, 433.459504], [0.0, 0.0, 1.0]],
-                      'CAM_BACK_LEFT': [[1250.78802, 0.0, 794.247861], [0.0, 1250.65546, 422.083681], [0.0, 0.0, 1.0]],
-                      'CAM_BACK_RIGHT': [[1250.27544, 0.0, 790.251605], [0.0, 1250.28658, 452.853747], [0.0, 0.0, 1.0]]}
 
 """ Init Nusc Dataset """
 dataset = NuscDetDataset(ida_aug_conf=ida_aug_conf,
@@ -3985,11 +3830,11 @@ dataset = NuscDetDataset(ida_aug_conf=ida_aug_conf,
                          is_train=False,
                          
                          # Dataset customization
-                         tangent_intrinsics=tangent_intrinsics,
-                         sensor2ego_rot_eulers=sensor2ego_rot_eulers,
-                         sensor2ego_trans=sensor2ego_trans,
-                         ego2global_rotation=ego2global_rotation,
-                         ego2global_translation=ego2global_translation,
+                         # tangent_intrinsics=tangent_intrinsics,
+                         # sensor2ego_rot_eulers=sensor2ego_rot_eulers,
+                         # sensor2ego_trans=sensor2ego_trans,
+                         # ego2global_rotation=ego2global_rotation,
+                         # ego2global_translation=ego2global_translation,
                          
                          infos=infos,
                          
@@ -4011,420 +3856,255 @@ data_loader = torch.utils.data.DataLoader(
 
 idx = -1
 data_iterator = iter(data_loader)
-data = next(data_iterator)
 
-# Iterator
-idx = idx + 1
-idx
+inf_num = 1000
 
-(_, mats, _, img_metas, _, _, campose_imgs) = data
+while idx < inf_num:
+    data = next(data_iterator)
+    idx += 1
 
-for key, value in mats.items():
-    mats[key] = value.to(device)
-    
-# Collect adjacent erp images
-adj_erp_imgs = list()
-for key_idx in [0, -1]: # current idx first
-    cur_idx = key_idx + idx
-    if cur_idx < 0: # first frame of the scene video
-        cur_idx = idx
-    
-    # load images
-    fname = erp_imgs[cur_idx]
-    print(f"Load {cur_idx}th erp image")
-    erp_img = cv2.imread(fname, cv2.IMREAD_COLOR)
-    erp_img = erp_img.astype(np.float32) / 255
-    erp_img = np.transpose(erp_img, [2, 0, 1]) # permutation, 세 번째 axis가 첫 번째 axis로
-    erp_img = torch.from_numpy(erp_img) # Create Tensor from numpy array
-    erp_img = erp_img.unsqueeze(0) # Increase Tensor dimension by 1
-    
-    adj_erp_imgs.append(erp_img)
-    
-# 시작!
-with torch.no_grad():
-    starter.record()
-    
-    # to GPU memory (시간 측정?)
-    for i, erp_img in enumerate(adj_erp_imgs):
-        adj_erp_imgs[i] = erp_img.to(device)
+    with torch.no_grad():
+        (sweep_imgs, mats, _, img_metas, _, _, campose_imgs) = data
 
-    # Tangent projection with GPU
-    persp_seqs = list()
-    for erp_img in adj_erp_imgs:
-        persp = F.grid_sample(erp_img, grid, mode='bilinear', padding_mode='zeros', align_corners=True)
-        persp_reshape = F.unfold(persp, kernel_size=(tangent_h, tangent_w), stride=(tangent_h, tangent_w))
-        persp_reshape = persp_reshape.reshape(1, 3, tangent_h, tangent_w, n_patch)
-        persp_seqs.append(persp_reshape)
+        sweep_imgs = sweep_imgs.to(device) # sweep_imgs: Input images with shape of (B, num_sweeps, num_cameras, 3, H, W) 
+        for key, value in mats.items():
+            mats[key] = value.to(device)
 
-    # Re-shape patches and prepare camera pose estimation inputs
-    sweep_patches = list()
-    sweep_pose_inputs = list()
-    for persp_seq in persp_seqs:
-        patches = list()
-        campose_inputs = list()
-        for i in range(len(ida_aug_conf['cams'])):
-            patch = persp_seq[0, :, :, :, i]
-            
-            # Resize patch for camera pose input
-            campose_input = F.interpolate(patch.unsqueeze(0), size=(192, 640), # Image resize with interpolate function
-                                          mode='bicubic', align_corners=False) # bicubic, bilinear, ...
-            campose_inputs.append(campose_input)
-            
-            # image normalization for model input
-            patch = transforms.ToPILImage()(patch) # time (ms):  5.7
-            patch = mmcv.imnormalize(np.array(patch), 
-                                     np.array(img_conf['img_mean'], np.float32), # TODO check: img_mean, img_std?
-                                     np.array(img_conf['img_std'], np.float32),
-                                     img_conf['to_rgb']) # time (ms):  5.79
-            patch = torch.from_numpy(patch).permute(2, 0, 1) # time (ms):  0.34
-            patch = patch.to(device) # time (ms):  1.20
-            
-            patches.append(patch)
-        sweep_patches.append(torch.stack(patches, 0))
-        sweep_pose_inputs.append(torch.stack(campose_inputs))
-    sweep_patches = torch.stack(sweep_patches, 0).unsqueeze(0)
+        campose_imgs = campose_imgs[0]
+        for index, img_pair in enumerate(campose_imgs):
+            campose_imgs[index] = img_pair.to(device)
 
-    # Camera pose estimation
-    campose_mats = list()
-    for cam_idx in range(len(ida_aug_conf['cams'])):
-        source_image = sweep_pose_inputs[0][cam_idx]
-        target_image = sweep_pose_inputs[1][cam_idx]
-        pose_inputs = [source_image, target_image]
-        # if cam_idx == 0:
-        #     print(torch.cat(pose_inputs, 1).shape)
-        pose_inputs = [pose_enc(torch.cat(pose_inputs, 1))]
-        axisangle, translation = pose_dec(pose_inputs)
-        # print("CAM", ida_aug_conf['cams'][cam_idx])
-        # print("pose axis angle", axisangle)
-        # print("pose translation", translation)
-        pose = transformation_from_parameters(axisangle[:, 0], translation[:, 0], invert=False)
-        # print(f"Pose matrix for image pair {cam_idx}: \n{pose}")
-        campose_mats.append(pose)
+        campose_mats = list()
+        for cam_idx, image_pair in enumerate(campose_imgs):
+            source_image, target_image = image_pair
+            pose_inputs = [source_image, target_image]
+            pose_inputs = [pose_enc(torch.cat(pose_inputs, 1))]
+            axisangle, translation = pose_dec(pose_inputs)
+            pose = transformation_from_parameters(axisangle[:, 0], translation[:, 0], invert=False)
+            campose_mats.append(pose)
 
-    sensor2sensor_mats = list()
-    sensor2sensor_mats.append(torch.stack(campose_mats, 0).unsqueeze(0))
-    sensor2sensor_mats.append(sensor2sensor_mats[0].inverse())
-    
-    # 3D object detection
-    preds = model(sweep_patches, mats, posenet_outputs=sensor2sensor_mats)
+        sensor2sensor_mats = list()
+        sensor2sensor_mats.append(torch.stack(campose_mats, 0).unsqueeze(0))
+        sensor2sensor_mats.append(sensor2sensor_mats[0].inverse())
 
-    ender.record()
-    torch.cuda.synchronize()
-    inference_time = starter.elapsed_time(ender)
-    print("inference time (ms): ", inference_time)
+        # 3D object detection
+        preds_posenet = model(sweep_imgs, mats, posenet_outputs=sensor2sensor_mats)
+        preds_nusc = model(sweep_imgs, mats)
 
-results = model.get_bboxes(preds, img_metas)
-for i in range(len(results)):
-    results[i][0] = results[i][0].detach().cpu().numpy()
-    results[i][1] = results[i][1].detach().cpu().numpy()
-    results[i][2] = results[i][2].detach().cpu().numpy()
-    results[i].append(img_metas[i])
-
-print("찾은 물체 개수: ", len(results[0][:3][0]))
-
-""" format bbox results """
-pred_results = results[0][:3]
-img_metas = results[0][3]
-
-boxes, scores, labels = pred_results
-boxes = boxes
-sample_token = img_metas['token']
-trans = np.array(img_metas['ego2global_translation'])
-rot = Quaternion(img_metas['ego2global_rotation'])
-nusc_annos = {}
-annos = list()
-
-for i, box in enumerate(boxes):
-    name = CLASSES[labels[i]]
-    center = box[:3]
-    wlh = box[[4, 3, 5]]
-    box_yaw = box[6]
-    box_vel = box[7:].tolist()
-    box_vel.append(0)
-    quat = pyquaternion.Quaternion(axis=[0, 0, 1], radians=box_yaw)
-    
-    nusc_box = Box(center, wlh, quat, velocity=box_vel)
-    nusc_box.rotate(rot)
-    nusc_box.translate(trans)
-    
-    if np.sqrt(nusc_box.velocity[0]**2 + nusc_box.velocity[1]**2) > 0.2:
-        if name in ['car','construction_vehicle','bus','truck','trailer']:
-            attr = 'vehicle.moving'
-        elif name in ['bicycle', 'motorcycle']:
-            attr = 'cycle.with_rider'
-        else:
-            attr = DefaultAttribute[name]
-    else:
-        if name in ['pedestrian']:
-            attr = 'pedestrian.standing'
-        elif name in ['bus']:
-            attr = 'vehicle.stopped'
-        else:
-            attr = DefaultAttribute[name]
-    nusc_anno = dict(
-        sample_token=sample_token,
-        translation=nusc_box.center.tolist(),
-        size=nusc_box.wlh.tolist(),
-        rotation=nusc_box.orientation.elements.tolist(),
-        velocity=nusc_box.velocity[:2],
-        detection_name=name,
-        detection_score=float(scores[i]),
-        attribute_name=attr,
-    )
-    annos.append(nusc_anno)
-nusc_annos[sample_token] = annos
-
-modality=dict(use_lidar=False,
-              use_camera=True,
-              use_radar=False,
-              use_map=False,
-              use_external=False)
-nusc_submissions = {
-    'meta': modality,
-    'results': nusc_annos,
-}
-
-""" save results to json file"""
-jsonfile_prefix = os.path.dirname('./outputs/' + exp_name + '/')
-mmcv.mkdir_or_exist(jsonfile_prefix)
-res_path = os.path.join(jsonfile_prefix, 'results_nusc.json')
-print('Results writes to', res_path)
-mmcv.dump(nusc_submissions, res_path)
-
-def get_ego_box(box_dict, ego2global_rotation, ego2global_translation):
-    box = Box(
-        box_dict['translation'],
-        box_dict['size'],
-        Quaternion(box_dict['rotation']),
-    )
-    trans = -np.array(ego2global_translation)
-    rot = Quaternion(ego2global_rotation).inverse
-    box.translate(trans)
-    box.rotate(rot)
-    box_xyz = np.array(box.center)
-    box_dxdydz = np.array(box.wlh)[[1, 0, 2]]
-    box_yaw = np.array([box.orientation.yaw_pitch_roll[0]])
-    box_velo = np.array(box.velocity[:2])
-    return np.concatenate([box_xyz, box_dxdydz, box_yaw, box_velo])
-
-def rotate_points_along_z(points, angle):
-    """
-    Args:
-        points: (B, N, 3 + C)
-        angle: (B), angle along z-axis, angle increases x ==> y
-    Returns:
-    """
-    cosa = np.cos(angle)
-    sina = np.sin(angle)
-    zeros = np.zeros(points.shape[0])
-    ones = np.ones(points.shape[0])
-    rot_matrix = np.stack(
-        (cosa, sina, zeros, -sina, cosa, zeros, zeros, zeros, ones),
-        axis=1).reshape(-1, 3, 3)
-    points_rot = np.matmul(points[:, :, 0:3], rot_matrix)
-    points_rot = np.concatenate((points_rot, points[:, :, 3:]), axis=-1)
-    return points_rot
-
-def get_corners(boxes3d):
-    """
-        7 -------- 4
-       /|         /|
-      6 -------- 5 .
-      | |        | |
-      . 3 -------- 0
-      |/         |/
-      2 -------- 1
-    Args:
-        boxes3d:  (N, 7) [x, y, z, dx, dy, dz, heading],
-            (x, y, z) is the box center
-    Returns:
-    """
-    template = (np.array((
-        [1, 1, -1],
-        [1, -1, -1],
-        [-1, -1, -1],
-        [-1, 1, -1],
-        [1, 1, 1],
-        [1, -1, 1],
-        [-1, -1, 1],
-        [-1, 1, 1],
-    )) / 2)
-
-    corners3d = np.tile(boxes3d[:, None, 3:6], [1, 8, 1]) * template[None, :, :]
-    corners3d = rotate_points_along_z(corners3d.reshape(-1, 8, 3),boxes3d[:, 6]).reshape(-1, 8, 3)
-    corners3d += boxes3d[:, None, 0:3]
-
-    return corners3d
-
-def get_bev_lines(corners):
-    return [[[corners[i, 0], corners[(i + 1) % 4, 0]],
-             [corners[i, 1], corners[(i + 1) % 4, 1]]] for i in range(4)]
-
-def get_3d_lines(corners):
-    ret = []
-    for st, ed in [[0, 1], [1, 2], [2, 3], [3, 0], [4, 5], [5, 6], [6, 7],
-                   [7, 4], [0, 4], [1, 5], [2, 6], [3, 7]]:
-        if corners[st, -1] > 0 and corners[ed, -1] > 0:
-            ret.append([[corners[st, 0], corners[ed, 0]],
-                        [corners[st, 1], corners[ed, 1]]])
-    return ret
-
-def get_cam_corners(corners, translation, rotation, cam_intrinsics):
-    cam_corners = corners.copy()
-    cam_corners -= np.array(translation)
-    cam_corners = cam_corners @ Quaternion(rotation).inverse.rotation_matrix.T
-    cam_corners = cam_corners @ np.array(cam_intrinsics).T
-    valid = cam_corners[:, -1] > 0
-    cam_corners /= cam_corners[:, 2:3]
-    cam_corners[~valid] = 0
-    return cam_corners
-
-vis_tangent_h = 900 # visualization resolution
-vis_tangent_w = 1600
-
-n_patch, vis_grid = createProjectGrid(erp_h, erp_w, vis_tangent_h, vis_tangent_w, num_rows, num_cols, phi_centers, fov)
-
-# load erp image
-fname = erp_imgs[idx]
-vis_erp_img = cv2.imread(fname, cv2.IMREAD_COLOR)
-vis_erp_img = vis_erp_img.astype(np.float32) / 255
-vis_erp_img = np.transpose(vis_erp_img, [2, 0, 1]) # permutation, 세 번째 axis가 첫 번째 axis로
-vis_erp_img = torch.from_numpy(vis_erp_img) # Create Tensor from numpy array
-vis_erp_img = vis_erp_img.unsqueeze(0) # Increase Tensor dimension by 1
-vis_erp_img = vis_erp_img.to(device)
-
-vis_persp = F.grid_sample(vis_erp_img, vis_grid, mode='bilinear', padding_mode='zeros', align_corners=True)
-vis_persp_reshape = F.unfold(vis_persp, kernel_size=(vis_tangent_h, vis_tangent_w), stride=(vis_tangent_h, vis_tangent_w))
-vis_persp_reshape = vis_persp_reshape.reshape(1, 3, vis_tangent_h, vis_tangent_w, n_patch).cpu()
-
-# Visualize Tangent patches
-
-# patch_num = 0
-# for num_col in num_cols:
-#     patch_num = num_col + patch_num
-
-# _, ax = plt.subplots(2, 3, figsize=(24, 10))
-# j = 0
-# for i in range(patch_num):
-#     patch_cnt = i
-#     if i == 3:
-#         j += 1
-#     i = i % 3
-
-#     cur_patch = vis_persp_reshape[0, :, :, :, patch_cnt].permute(1, 2, 0).numpy()
-#     cur_patch = cur_patch * 255
-#     ax[j, i].imshow(cur_patch[:,:,[2,1,0]].astype(np.uint8), aspect=1)
-
-# plt.show()
-
-result_path = './outputs/bevstereo_ema_da_key2/results_nusc.json'
-save_path = './outputs/det_result_imgs/scene_5/'
-data_root = '../data/nuscenes/'
-results = mmcv.load(result_path)['results']
-show_classes=[
-    'car',
-    'truck',
-    'construction_vehicle',
-    'bus',
-    'trailer',
-    'barrier',
-    'motorcycle',
-    'bicycle',
-    'pedestrian',
-    'traffic_cone',
-]
-
-# IMG_KEYS = ['CAM_FRONT_LEFT', 'CAM_FRONT', 'CAM_FRONT_RIGHT', 'CAM_BACK_RIGHT', 'CAM_BACK', 'CAM_BACK_LEFT']
-IMG_KEYS = ['CAM_BACK_RIGHT', 'CAM_FRONT_LEFT', 'CAM_FRONT', 'CAM_FRONT_RIGHT', 'CAM_BACK_LEFT', 'CAM_BACK']
-
-# Get data from dataset
-info = infos[0] # nusc dataset의 idx는 0으로 고정
-
-ego2global_rotation = img_metas['ego2global_rotation']
-ego2global_translation = img_metas['ego2global_translation']
-
-# Set cameras
-threshold = 0.35
-show_range = 60
-
-# Get prediction corners
-pred_corners, pred_class = [], []
-for box in results[info['sample_token']]:
-    if box['detection_score'] >= threshold and box['detection_name'] in show_classes:
-        box3d = get_ego_box(box, ego2global_rotation, ego2global_translation)
-        box3d[2] += 0.5 * box3d[5]  # NOTE
-        if np.linalg.norm(box3d[:2]) <= show_range:
-            corners = get_corners(box3d[None])[0]
-            pred_corners.append(corners)
-            pred_class.append(box['detection_name'])
-
-# Set figure size
-plt.figure(figsize=(21, 8))
-
-for i, k in enumerate(ida_aug_conf['cams']):
-    # Draw camera views
-    fig_idx = i + 1 if i < 3 else i + 1
-    plt.subplot(2, 3, fig_idx)
-
-    # Set camera attributes
-    plt.title(k)
-    plt.axis('off')
-    plt.xlim(0, 1600)
-    plt.ylim(900, 0)
-
-    cur_patch = vis_persp_reshape[0, :, :, :, i].permute(1, 2, 0).numpy()
-    cur_patch = cur_patch * 255
-    img = cur_patch[:,:,[2,1,0]].astype(np.uint8)
-    
-    # Draw images
-    plt.imshow(img)
-
-    # Draw 3D predictions
-    for corners, cls in zip(pred_corners, pred_class):
         
-        if dataset.sensor2ego_trans is None:
-            sensor2ego_trans = info['cam_infos'][k]['calibrated_sensor']['translation']
-        else:
-            sensor2ego_trans = dataset.sensor2ego_trans
+    results_posenet = model.get_bboxes(preds_posenet, img_metas)
+    results_nusc = model.get_bboxes(preds_nusc, img_metas)
+
+    # for i in range(len(results)):
+    #     results[i][0] = results[i][0].detach().cpu().numpy()
+    #     results[i][1] = results[i][1].detach().cpu().numpy()
+    #     results[i][2] = results[i][2].detach().cpu().numpy()
+    #     results[i].append(img_metas[i])
+
+    for i in range(len(results_posenet)):
+        results_posenet[i][0] = results_posenet[i][0].detach().cpu().numpy()
+        results_posenet[i][1] = results_posenet[i][1].detach().cpu().numpy()
+        results_posenet[i][2] = results_posenet[i][2].detach().cpu().numpy()
+        results_posenet[i].append(img_metas[i])
+
+    for i in range(len(results_nusc)):
+        results_nusc[i][0] = results_nusc[i][0].detach().cpu().numpy()
+        results_nusc[i][1] = results_nusc[i][1].detach().cpu().numpy()
+        results_nusc[i][2] = results_nusc[i][2].detach().cpu().numpy()
+        results_nusc[i].append(img_metas[i])
+
+    print("찾은 물체 개수 results_posenet: ", len(results_posenet[0][:3][0]))
+    print("찾은 물체 개수 results_nusc: ", len(results_nusc[0][:3][0]))
+
+    """ format bbox results """
+    results_list = [results_posenet, results_nusc]
+    save_paths = ['./outputs/det_result_imgs/nusc_posenet/', './outputs/det_result_imgs/nusc_default/']
+    for result_index, results in enumerate(results_list):
         
-        if dataset.sensor2ego_rot_eulers is None:
-            sensor2ego_rot = info['cam_infos'][k]['calibrated_sensor']['rotation']
-        else:
-            sensor2ego_degrees = dataset.sensor2ego_rot_eulers[k]
-            sensor2ego_radians = [degree * np.pi / 180 for degree in sensor2ego_degrees]
-            # print(sensor2ego_degrees)
-            sensor2ego_q = Quaternion(get_quaternion_from_euler(sensor2ego_radians))
-            sensor2ego_rot = sensor2ego_q
+        save_path = save_paths[result_index]
         
-        if dataset.tangent_intrinsics is None:
-            intrinsic = info['cam_infos'][k]['calibrated_sensor']['camera_intrinsic']
-        else:
-            intrinsic = tangent_intrinsics[k]
-            
-        cam_corners = get_cam_corners(corners, sensor2ego_trans, sensor2ego_rot, intrinsic)
-        # cam_corners = get_cam_corners(
-        #         corners,
-        #         info['cam_infos'][k]['calibrated_sensor']['translation'],
-        #         info['cam_infos'][k]['calibrated_sensor']['rotation'],
-        #         info['cam_infos'][k]['calibrated_sensor']['camera_intrinsic'])
-        
-        lines = get_3d_lines(cam_corners)
-        for line in lines:
-            plt.plot(line[0],
-                     line[1],
-                     c=cm.get_cmap('tab10')(show_classes.index(cls)))
+        pred_results = results[0][:3]
+        boxes, scores, labels = pred_results
 
-# Set legend
-handles, labels = plt.gca().get_legend_handles_labels()
-by_label = dict(zip(labels, handles))
-plt.legend(by_label.values(),
-           by_label.keys(),
-           loc='upper right',
-           framealpha=1)
+        img_metas = results[0][3]
+        sample_token = img_metas['token']
+        trans = np.array(img_metas['ego2global_translation'])
+        rot = Quaternion(img_metas['ego2global_rotation'])
 
-plt.tight_layout(w_pad=0, h_pad=2)
-plt.savefig(save_path+"output_"+str(idx)+".jpg")
-# plt.show()
+        nusc_annos = {}
+        annos = list()
+        for i, box in enumerate(boxes):
+            name = CLASSES[labels[i]]
+            center = box[:3]
+            wlh = box[[4, 3, 5]]
+            box_yaw = box[6]
+            box_vel = box[7:].tolist()
+            box_vel.append(0)
+            quat = pyquaternion.Quaternion(axis=[0, 0, 1], radians=box_yaw)
+            nusc_box = Box(center, wlh, quat, velocity=box_vel)
 
-plt.close()
+            nusc_box.rotate(rot)
+            nusc_box.translate(trans)
 
+            if np.sqrt(nusc_box.velocity[0]**2 + nusc_box.velocity[1]**2) > 0.2:
+                if name in ['car','construction_vehicle','bus','truck','trailer']:
+                    attr = 'vehicle.moving'
+                elif name in ['bicycle', 'motorcycle']:
+                    attr = 'cycle.with_rider'
+                else:
+                    attr = DefaultAttribute[name]
+            else:
+                if name in ['pedestrian']:
+                    attr = 'pedestrian.standing'
+                elif name in ['bus']:
+                    attr = 'vehicle.stopped'
+                else:
+                    attr = DefaultAttribute[name]
+            nusc_anno = dict(
+                sample_token=sample_token,
+                translation=nusc_box.center.tolist(),
+                size=nusc_box.wlh.tolist(),
+                rotation=nusc_box.orientation.elements.tolist(),
+                velocity=nusc_box.velocity[:2],
+                detection_name=name,
+                detection_score=float(scores[i]),
+                attribute_name=attr,
+            )
+            annos.append(nusc_anno)
+        nusc_annos[sample_token] = annos
+
+        modality=dict(use_lidar=False,
+                      use_camera=True,
+                      use_radar=False,
+                      use_map=False,
+                      use_external=False)
+        nusc_submissions = {
+            'meta': modality,
+            'results': nusc_annos,
+        }
+
+        """ save results to json file"""
+        jsonfile_prefix = os.path.dirname('./outputs/' + exp_name + '/')
+        mmcv.mkdir_or_exist(jsonfile_prefix)
+        res_path = os.path.join(jsonfile_prefix, 'results_nusc.json')
+        print('Results writes to', res_path)
+        mmcv.dump(nusc_submissions, res_path)
+
+        result_path = './outputs/bevstereo_ema_da_key2/results_nusc.json'
+        # save_path = './outputs/det_result_imgs/scene_5/'
+        data_root = '../data/nuscenes/'
+
+        results = mmcv.load(result_path)['results']
+        show_classes=[
+            'car',
+            'truck',
+            'construction_vehicle',
+            'bus',
+            'trailer',
+            'barrier',
+            'motorcycle',
+            'bicycle',
+            'pedestrian',
+            'traffic_cone',
+        ]
+
+        # IMG_KEYS = ['CAM_FRONT_LEFT', 'CAM_FRONT', 'CAM_FRONT_RIGHT', 'CAM_BACK_RIGHT', 'CAM_BACK', 'CAM_BACK_LEFT']
+
+        # Get data from dataset
+        info = infos[idx] # nusc dataset의 idx는 0으로 고정
+
+        ego2global_rotation = img_metas['ego2global_rotation']
+        ego2global_translation = img_metas['ego2global_translation']
+
+        # Set cameras
+        threshold = 0.4
+        show_range = 60
+
+        # Set figure size
+        plt.figure(figsize=(21, 8))
+
+        imsize = (1600, 900)
+        box_vis_level = BoxVisibility.ANY
+
+        for i, k in enumerate(ida_aug_conf['cams']):
+            # Draw camera views
+            fig_idx = i + 1 if i < 3 else i + 1
+            plt.subplot(2, 3, fig_idx)
+
+            # Set camera attributes
+            plt.title(k)
+            plt.axis('off')
+            plt.xlim(0, 1600)
+            plt.ylim(900, 0)
+
+            img = mmcv.imread(os.path.join(data_root, info['cam_infos'][k]['filename']))
+            img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+
+            # Draw images
+            plt.imshow(img)
+
+            if dataset.sensor2ego_trans is None:
+                sensor2ego_trans = info['cam_infos'][k]['calibrated_sensor']['translation']
+            else:
+                sensor2ego_trans = dataset.sensor2ego_trans
+
+            if dataset.sensor2ego_rot_eulers is None:
+                sensor2ego_rot = info['cam_infos'][k]['calibrated_sensor']['rotation']
+            else:
+                sensor2ego_degrees = dataset.sensor2ego_rot_eulers[k]
+                sensor2ego_radians = [degree * np.pi / 180 for degree in sensor2ego_degrees]
+                sensor2ego_q = Quaternion(get_quaternion_from_euler(sensor2ego_radians))
+                sensor2ego_rot = sensor2ego_q
+
+            if dataset.tangent_intrinsics is None:
+                intrinsic = info['cam_infos'][k]['calibrated_sensor']['camera_intrinsic']
+            else:
+                intrinsic = tangent_intrinsics[k]
+            intrinsic = np.array(intrinsic)
+
+            # print(k)
+            # print(sensor2ego_trans)
+            # print(sensor2ego_rot)
+            # print(intrinsic)
+
+            boxes_pred = []
+            for box_dict in results[info['sample_token']]:
+                if box_dict['detection_score'] >= threshold and box_dict['detection_name'] in show_classes:
+                    box = Box(
+                        box_dict['translation'],
+                        box_dict['size'],
+                        Quaternion(box_dict['rotation']),
+                        name=box_dict['detection_name']
+                    )
+
+                    # Calculate box coordinate in the ego coord. system
+                    trans = -np.array(ego2global_translation)
+                    rot = Quaternion(ego2global_rotation).inverse
+                    box.translate(trans)
+                    box.rotate(rot)
+                    boxes_pred.append(box)
+
+            # box를 ego => sensor로 이동
+            for box in boxes_pred:
+                box.translate(-np.array(sensor2ego_trans))
+                box.rotate(Quaternion(sensor2ego_rot).inverse)
+                # cam_corners = cam_corners @ Quaternion(sensor2ego_rot).inverse.rotation_matrix.T
+
+                if box_in_image(box, intrinsic, imsize, vis_level=box_vis_level):
+                    c=cm.get_cmap('tab10')(show_classes.index(box.name))
+                    box.render(plt, view=intrinsic, normalize=True, colors=(c, c, c))
+
+        # Set legend
+        handles, labels = plt.gca().get_legend_handles_labels()
+        by_label = dict(zip(labels, handles))
+        plt.legend(by_label.values(),
+                   by_label.keys(),
+                   loc='upper right',
+                   framealpha=1)
+
+        plt.tight_layout(w_pad=0, h_pad=2)
+        save_name ='output_%06d.jpg' % idx
+        plt.savefig(save_path+save_name)
+
+        # plt.show()
+        plt.close()
